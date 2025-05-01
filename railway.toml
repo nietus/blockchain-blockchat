@@ -2,4 +2,4 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python node_server.py" 
+startCommand = "python multi_node_launcher.py" 

@@ -1,1 +1,3 @@
-web: python node_server.py 
+node0: FLASK_RUN_PORT=8000 KADEMLIA_PORT=5678 python node_server.py
+node1: FLASK_RUN_PORT=8001 KADEMLIA_PORT=5679 KADEMLIA_BOOTSTRAP=localhost:5678 python node_server.py
+node2: FLASK_RUN_PORT=8002 KADEMLIA_PORT=5680 KADEMLIA_BOOTSTRAP=localhost:5678 python node_server.py 
