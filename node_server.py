@@ -165,7 +165,16 @@ CORS(app)
 blockchain = None
 kademlia_node = None
 kademlia_thread = None
-this_node_http_address = os.environ.get('HTTP_NODE_ADDRESS', f'http://127.0.0.1:{os.environ.get("FLASK_RUN_PORT", 8000)}')
+
+# Handle Railway deployment URL
+railway_url = os.environ.get('RAILWAY_STATIC_URL', '')
+port = os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 8000))
+
+if railway_url:
+    this_node_http_address = railway_url
+else:
+    this_node_http_address = os.environ.get('HTTP_NODE_ADDRESS', f'http://127.0.0.1:{port}')
+
 data_file_path = os.environ.get('DATA_FILE', 'chain.json')
 
 hostname = socket.gethostname()
@@ -516,6 +525,7 @@ if __name__ == '__main__':
     load_chain() 
     setup_and_run_kademlia()
     
-    port = int(os.environ.get('FLASK_RUN_PORT', 8000))
-    logger.info(f"Starting Flask server at {this_node_http_address}...")
+    # Railway provides PORT environment variable
+    port = int(os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 8000)))
+    logger.info(f"Starting Flask server at port {port}...")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
