@@ -10,7 +10,7 @@ import asyncio
 import logging
 import socket
 
-from flask import Flask, request
+from flask import Flask, request, Blueprint
 import requests
 from kademlia_node import KademliaNode
 from flask_cors import CORS
@@ -162,6 +162,15 @@ class Blockchain:
 app = Flask(__name__)
 CORS(app)
 
+# Handle URL prefixes for Railway deployment
+node_prefix = os.environ.get('NODE_PREFIX', '')
+if node_prefix:
+    # In Railway deployment, create a blueprint with prefix
+    bp = Blueprint('node', __name__, url_prefix=node_prefix)
+else:
+    # In local development, use the app directly
+    bp = app
+
 blockchain = None
 kademlia_node = None
 kademlia_thread = None
@@ -291,7 +300,7 @@ def graceful_shutdown():
 
 atexit.register(graceful_shutdown)
 
-@app.route('/new_transaction', methods=['POST'])
+@bp.route('/new_transaction', methods=['POST'])
 def new_transaction():
     if not blockchain:
          return "Blockchain not initialized", 500
@@ -311,7 +320,7 @@ def new_transaction():
     else:
          return "Invalid transaction data", 400
 
-@app.route('/chain', methods=['GET'])
+@bp.route('/chain', methods=['GET'])
 def get_chain():
     if not blockchain:
          return "Blockchain not initialized", 500
@@ -321,7 +330,7 @@ def get_chain():
                        "chain": chain_data,
                        "peers": list(active_peers) })
 
-@app.route('/mine', methods=['GET'])
+@bp.route('/mine', methods=['GET'])
 def mine_unconfirmed_transactions():
     if not blockchain:
          return "Blockchain not initialized", 500
@@ -358,7 +367,7 @@ def get_http_peers():
     else:
         return set()
 
-@app.route('/register_node', methods=['POST'])
+@bp.route('/register_node', methods=['POST'])
 def register_new_peers():
     logger.info("Received manual peer registration request (less relevant with Kademlia).")
     nodes = request.get_json().get('nodes')
@@ -366,13 +375,13 @@ def register_new_peers():
         pass 
     return "Kademlia handles dynamic discovery.", 200
 
-@app.route('/register_with', methods=['POST'])
+@bp.route('/register_with', methods=['POST'])
 def register_with_existing_node():
     node_address = request.get_json().get("node_address")
     logger.info(f"Received registration request from {node_address} (less relevant with Kademlia).")
     return "Registration acknowledged (Kademlia handles discovery)", 200
 
-@app.route('/add_block', methods=['POST'])
+@bp.route('/add_block', methods=['POST'])
 def verify_and_add_block():
     if not blockchain:
          return "Blockchain not initialized", 500
@@ -410,7 +419,7 @@ def verify_and_add_block():
         logger.error(f"Error processing received block: {e}", exc_info=True)
         return "Internal server error processing block", 500
 
-@app.route('/pending_tx')
+@bp.route('/pending_tx')
 def get_pending_tx():
      if not blockchain:
           return "Blockchain not initialized", 500
@@ -520,6 +529,10 @@ def send_announcement(node_address, data, headers):
           logger.warning(f"Failed to announce block to {node_address}: {e}")
      except Exception as e:
           logger.error(f"Unexpected error announcing block to {node_address}: {e}")
+
+# Register blueprint if using prefixes
+if node_prefix:
+    app.register_blueprint(bp)
 
 if __name__ == '__main__':
     load_chain() 

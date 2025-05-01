@@ -2,4 +2,4 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python multi_node_launcher.py" 
+startCommand = "python railway_node_server.py" 
