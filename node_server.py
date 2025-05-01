@@ -300,6 +300,13 @@ def graceful_shutdown():
 
 atexit.register(graceful_shutdown)
 
+@bp.route('/', methods=['GET'])
+def home():
+    """Home endpoint for health checks"""
+    if not blockchain:
+        return "Blockchain not initialized", 500
+    return f"Blockchain node is running. Chain length: {len(blockchain.chain)}", 200
+
 @bp.route('/new_transaction', methods=['POST'])
 def new_transaction():
     if not blockchain:

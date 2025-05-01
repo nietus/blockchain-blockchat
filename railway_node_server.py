@@ -35,11 +35,16 @@ def start_node(node_id, http_port, kademlia_port, bootstrap_node=None):
     else:
         env['HTTP_NODE_ADDRESS'] = f"http://127.0.0.1:{http_port}"
     
+    # IMPORTANT: Remove PORT environment variable that would override FLASK_RUN_PORT
+    # This ensures each node uses its own port instead of all trying to use the Railway PORT
+    if 'PORT' in env:
+        del env['PORT']
+    
     # Set bootstrap node if provided
     if bootstrap_node:
         env['KADEMLIA_BOOTSTRAP'] = bootstrap_node
     
-    print(f"Starting node {node_id} - HTTP: {env['HTTP_NODE_ADDRESS']}, Kademlia port: {kademlia_port}")
+    print(f"Starting node {node_id} - HTTP: {env['HTTP_NODE_ADDRESS']}, Kademlia port: {kademlia_port}, Flask port: {http_port}")
     
     # Run the node as a separate process
     process = subprocess.Popen(['python', 'node_server.py'], env=env)
@@ -106,9 +111,11 @@ def proxy_to_node(node_id, subpath):
     
     # Forward the request to the node
     try:
-        # Forward the request to the node's port
-        method = request.method
-        url = f"http://localhost:{8000 + node_id}/{subpath}"
+        # Use the correct port for each node
+        http_port = 8000 + node_id
+        url = f"http://localhost:{http_port}/{subpath}"
+        
+        print(f"Proxying {request.method} request from {request.path} to {url}")
         
         # Get the data and headers from the original request
         headers = {k: v for k, v in request.headers if k != 'Host'}
@@ -116,11 +123,12 @@ def proxy_to_node(node_id, subpath):
         
         # Make the request to the internal node
         response = requests.request(
-            method=method,
+            method=request.method,
             url=url,
             headers=headers,
             data=data,
-            params=request.args
+            params=request.args,
+            timeout=10  # Add a timeout to prevent hanging
         )
         
         # Return the response from the node
@@ -130,6 +138,7 @@ def proxy_to_node(node_id, subpath):
             headers=dict(response.headers)
         )
     except Exception as e:
+        print(f"Error proxying request to Node {node_id} at port {http_port}: {str(e)}")
         return f"Error proxying request to Node {node_id}: {str(e)}", 500
 
 def signal_handler(sig, frame):
@@ -140,6 +149,39 @@ def signal_handler(sig, frame):
             process.terminate()
     sys.exit(0)
 
+def wait_for_nodes_to_be_ready(timeout=60):
+    """Wait for all nodes to be ready and responding"""
+    start_time = time.time()
+    ready_nodes = set()
+    
+    print("Waiting for nodes to be ready...")
+    
+    while time.time() - start_time < timeout and len(ready_nodes) < len(node_processes):
+        for node_id in node_processes:
+            if node_id in ready_nodes:
+                continue
+                
+            http_port = 8000 + node_id
+            try:
+                # Try to connect to the node
+                response = requests.get(f"http://localhost:{http_port}/", timeout=1)
+                if response.status_code < 500:  # Accept any non-server error response
+                    ready_nodes.add(node_id)
+                    print(f"Node {node_id} is ready on port {http_port}")
+            except requests.RequestException:
+                # Node not ready yet
+                pass
+                
+        if len(ready_nodes) < len(node_processes):
+            time.sleep(1)
+    
+    if len(ready_nodes) == len(node_processes):
+        print("All nodes are ready!")
+        return True
+    else:
+        print(f"Timed out waiting for nodes. Only {len(ready_nodes)}/{len(node_processes)} nodes are ready.")
+        return False
+
 if __name__ == "__main__":
     # Register signal handler for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
@@ -148,6 +190,9 @@ if __name__ == "__main__":
     num_nodes = 3  # Default to 3 nodes
     print(f"Initializing {num_nodes} blockchain nodes...")
     initialize_nodes(num_nodes)
+    
+    # Wait for nodes to be ready
+    wait_for_nodes_to_be_ready()
     
     # Start the Flask app
     port = int(os.environ.get("PORT", 8080))
