@@ -1,0 +1,85 @@
+volumes:
+  data1:
+  data2:
+  data3:
+
+networks:
+  blockchain_network:
+    driver: bridge
+
+services:
+  backend1:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: python-blockchain-backend-1
+    hostname: backend1
+    container_name: backend1
+    environment:
+      FLASK_RUN_PORT: 8003
+      DATA_FILE: /data/chain.json
+      # Add direct peer list
+      BLOCKCHAIN_PEERS: "http://backend2:8001,http://backend3:8002"
+      HTTP_NODE_ADDRESS: http://backend1:8003
+      # Kademlia DHT configuration
+      KADEMLIA_PORT: 5678
+    ports:
+      - "8003:8003"
+      - "5678:5678/udp" # Kademlia DHT port (UDP)
+    volumes:
+      - "data1:/data"
+    networks:
+      - blockchain_network
+
+  backend2:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: python-blockchain-backend-2
+    hostname: backend2
+    container_name: backend2
+    environment:
+      FLASK_RUN_PORT: 8001
+      DATA_FILE: /data/chain.json
+      # Add direct peer list
+      BLOCKCHAIN_PEERS: "http://backend1:8003,http://backend3:8002"
+      HTTP_NODE_ADDRESS: http://backend2:8001
+      # Kademlia DHT configuration
+      KADEMLIA_PORT: 5679
+      KADEMLIA_BOOTSTRAP: "backend1:5678"
+    ports:
+      - "8001:8001"
+      - "5679:5679/udp" # Kademlia DHT port (UDP)
+    volumes:
+      - "data2:/data"
+    depends_on:
+      - backend1
+    networks:
+      - blockchain_network
+
+  backend3:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: python-blockchain-backend-3
+    hostname: backend3
+    container_name: backend3
+    environment:
+      FLASK_RUN_PORT: 8002
+      DATA_FILE: /data/chain.json
+      # Add direct peer list
+      BLOCKCHAIN_PEERS: "http://backend1:8003,http://backend2:8001"
+      HTTP_NODE_ADDRESS: http://backend3:8002
+      # Kademlia DHT configuration
+      KADEMLIA_PORT: 5680
+      KADEMLIA_BOOTSTRAP: "backend1:5678,backend2:5679"
+    ports:
+      - "8002:8002"
+      - "5680:5680/udp" # Kademlia DHT port (UDP)
+    volumes:
+      - "data3:/data"
+    depends_on:
+      - backend1
+      - backend2
+    networks:
+      - blockchain_network

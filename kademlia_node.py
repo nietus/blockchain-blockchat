@@ -1,0 +1,254 @@
+import asyncio
+import json
+import random
+import sys
+import socket
+import os
+import threading
+import time
+from kademlia.network import Server
+from kademlia.utils import digest
+
+class KademliaNode:
+    def __init__(self, port=5678, bootstrap_nodes=None, http_address=None):
+        """
+        Initialize a Kademlia node
+        
+        Args:
+            port (int): Port to listen on
+            bootstrap_nodes (list): List of (host, port) tuples for bootstrap nodes
+            http_address (str): HTTP address of the associated blockchain node
+        """
+        self.port = port
+        self.bootstrap_nodes = bootstrap_nodes or []
+        self.server = Server()
+        # Use a stable node_id if possible, maybe derived from http_address or persisted
+        # For simplicity, keeping random for now, but consider persistence
+        self.node_id = digest(random.getrandbits(255).to_bytes(32, byteorder='big'))
+        self.loop = asyncio.get_event_loop()
+        if self.loop.is_closed():
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+        self.running = False
+        # Store the HTTP address of the associated blockchain node
+        self.http_address = http_address or f'http://{self.get_ip()}:{os.environ.get("FLASK_RUN_PORT", 8000)}' # Fallback
+        self.dht_key = "blockchain_nodes_v2" # Use a distinct key
+        
+    async def start(self):
+        """Start the Kademlia server and join the network"""
+        if self.running:
+            print(f"Kademlia DHT already running on port {self.port}")
+            return
+            
+        try:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            test_socket.bind(('0.0.0.0', self.port))
+            test_socket.close()
+        except OSError as e:
+            if e.errno == 98:
+                print(f"Port {self.port} is already in use. Assuming existing instance.")
+                # Maybe try to connect to the existing instance?
+                # For now, we just won't start a new server.
+                self.running = False # Indicate we didn't start it
+                return
+            raise
+            
+        await self.server.listen(self.port)
+        self.running = True
+        print(f"Kademlia DHT node listening on port {self.port}")
+        
+        if self.bootstrap_nodes:
+            print(f"Bootstrapping with nodes: {self.bootstrap_nodes}")
+            # Use ensure_future for non-blocking bootstrap
+            tasks = [self.server.bootstrap([(host, port)]) for host, port in self.bootstrap_nodes]
+            await asyncio.gather(*tasks)
+            print("Bootstrap process initiated.")
+        
+        # Store richer node information
+        self.node_info = {
+            "kad_host": self.get_ip(),
+            "kad_port": self.port,
+            "http_address": self.http_address,
+            "node_id": self.node_id.hex(), # Use hex for JSON compatibility
+            "timestamp": asyncio.get_event_loop().time()
+        }
+        # Register asynchronously
+        asyncio.ensure_future(self.register_self())
+        print("Node registration scheduled.")
+    
+    async def register_self(self):
+        """Register this node in the DHT under a specific key"""
+        if not self.running:
+            print("Cannot register node - Kademlia DHT not running or failed to start")
+            return
+            
+        # Update timestamp before registering
+        self.node_info['timestamp'] = asyncio.get_event_loop().time()
+
+        try:
+            print(f"Attempting to register/update node info in DHT: {self.node_info}")
+            # Store this node's info using its own node_id as the key
+            await self.server.set(self.node_id.hex(), json.dumps(self.node_info))
+            print(f"Successfully registered node {self.node_id.hex()} in the DHT.")
+        except Exception as e:
+             print(f"Error registering node {self.node_id.hex()} in DHT: {e}")
+    
+    async def get_active_blockchain_peers(self, timeout_seconds=300):
+        """Get HTTP addresses of active blockchain peers discovered via Kademlia."""
+        if not self.running:
+            print("Cannot get peers - Kademlia DHT not running")
+            return []
+
+        print("Refreshing peer list via Kademlia...")
+        
+        peers = set()
+        try:
+            # Include self initially
+            potential_node_ids = {self.node_id.hex()} 
+            
+            # Access the routing table buckets directly
+            if hasattr(self.server, 'protocol') and hasattr(self.server.protocol, 'router'):
+                # Iterate through all buckets in the routing table
+                for bucket in self.server.protocol.router.buckets:
+                    for node in bucket.nodes:
+                        # Handle different node types safely
+                        try:
+                            # If node is already a node object with id attribute
+                            if hasattr(node, 'id'):
+                                if node.id:
+                                    potential_node_ids.add(node.id.hex())
+                            # If node is a raw bytes object (node ID)
+                            elif isinstance(node, bytes):
+                                potential_node_ids.add(node.hex())
+                            # If node is a tuple with the node ID as first element
+                            elif isinstance(node, tuple) and len(node) > 0 and isinstance(node[0], bytes):
+                                potential_node_ids.add(node[0].hex())
+                        except Exception as e:
+                            print(f"Error processing node in bucket: {e}, node type: {type(node)}")
+                            continue  # Skip this node and continue with others
+                
+                print(f"Found {len(potential_node_ids)} potential node IDs in routing table. Fetching details...")
+
+                tasks = [self.server.get(node_id) for node_id in potential_node_ids]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                current_time = asyncio.get_event_loop().time()
+                for i, result in enumerate(results):
+                    node_id = list(potential_node_ids)[i]
+                    if isinstance(result, Exception) or result is None:
+                        # print(f"Could not retrieve data for node {node_id}: {result}")
+                        continue
+                    try:
+                        node_data = json.loads(result)
+                        # Check timestamp for freshness
+                        if current_time - node_data.get('timestamp', 0) < timeout_seconds:
+                            if node_data.get('http_address') and node_data.get('node_id') != self.node_id.hex():
+                                 peers.add(node_data['http_address'])
+                        # else:
+                             # print(f"Node {node_id} data is stale.")
+
+                    except json.JSONDecodeError:
+                        print(f"Could not decode JSON for node {node_id}: {result}")
+                    except Exception as e:
+                        print(f"Error processing data for node {node_id}: {e}")
+
+        except Exception as e:
+            print(f"Error during Kademlia peer discovery: {e}")
+            import traceback
+            traceback.print_exc()
+
+        print(f"Discovered active blockchain peers via Kademlia: {list(peers)}")
+        return list(peers)
+    
+    def get_ip(self):
+        """Get the local IP address usable within the Docker network."""
+        # Inside Docker, hostname usually resolves correctly for inter-container communication
+        return socket.gethostname()
+    
+    def run_in_thread(self):
+        """Run the Kademlia node's asyncio loop in a separate thread."""
+        if self.running:
+            print("Kademlia run_in_thread called but already seems to be running.")
+            return
+            
+        def start_loop():
+            asyncio.set_event_loop(self.loop)
+            try:
+                self.loop.run_until_complete(self.start())
+                if self.running: # Check if start() succeeded
+                     # Schedule periodic registration update
+                     async def periodic_register():
+                         while self.running:
+                             await self.register_self()
+                             await asyncio.sleep(60) # Update registration every 60s
+                     asyncio.ensure_future(periodic_register(), loop=self.loop)
+                     self.loop.run_forever()
+            except OSError as e:
+                 if e.errno == 98:
+                     print(f"Kademlia port {self.port} is already in use.")
+                 else:
+                     print(f"Error starting Kademlia event loop: {e}")
+                     self.running = False
+            except Exception as e:
+                 print(f"Error in Kademlia event loop: {e}")
+                 self.running = False
+            finally:
+                 print("Kademlia event loop finished.")
+                 if not self.loop.is_closed():
+                     self.loop.call_soon_threadsafe(self.loop.stop)
+             
+        thread = threading.Thread(target=start_loop, daemon=True)
+        thread.start()
+        # Give some time for the server to start listening
+        time.sleep(1)
+        print(f"Kademlia thread started. Running state: {self.running}")
+        return thread
+    
+    def stop(self):
+        """Stop the Kademlia node safely from another thread."""
+        if self.running:
+            print("Stopping Kademlia node...")
+            self.running = False # Signal loops to stop
+            if self.loop.is_running():
+                 # Stop the server and the loop from the loop's thread
+                 self.loop.call_soon_threadsafe(self.server.stop)
+                 self.loop.call_soon_threadsafe(self.loop.stop)
+            print("Kademlia DHT stop requested.")
+        else:
+             print("Kademlia node stop called, but not running.")
+
+# Command line interface to run a standalone Kademlia node
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Run a Kademlia DHT node")
+    parser.add_argument('--port', type=int, default=5678, help='Port to listen on')
+    parser.add_argument('--bootstrap', nargs='+', default=[], 
+                        help='Bootstrap nodes in the format host:port')
+    parser.add_argument('--http-addr', type=str, default=None, help='HTTP address of the associated blockchain node')
+    
+    args = parser.parse_args()
+    
+    # Parse bootstrap nodes
+    bootstrap_nodes = []
+    for node in args.bootstrap:
+        try:
+            host, port = node.split(':')
+            bootstrap_nodes.append((host, int(port)))
+        except ValueError:
+            print(f"Invalid bootstrap node format: {node}. Should be host:port")
+            sys.exit(1)
+    
+    # Create and run the node
+    node = KademliaNode(port=args.port, bootstrap_nodes=bootstrap_nodes, http_address=args.http_addr)
+    
+    # Run in the main thread for standalone execution
+    try:
+        node.run_in_thread() # Start in thread
+        # Keep main thread alive
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        node.stop() 

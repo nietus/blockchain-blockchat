@@ -1,0 +1,6 @@
+Dockerfile.backend  
+Makefile
+compose.yaml
+*.md
+screenshots
+.gitignore
