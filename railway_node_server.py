@@ -127,9 +127,8 @@ def proxy_to_node(node_id, subpath):
         
         if railway_env:
             # In Railway, use internal container networking
-            # This assumes all the nodes are running in the same environment but different processes
-            # We use 0.0.0.0 to bind to all interfaces
-            url = f"http://0.0.0.0:{http_port}/{subpath}"
+            # Each node has a blueprint with NODE_PREFIX already set up
+            url = f"http://127.0.0.1:{http_port}/{subpath}"
         else:
             # In local development, use localhost
             url = f"http://localhost:{http_port}/{subpath}"
@@ -183,7 +182,9 @@ def wait_for_nodes_to_be_ready(timeout=60):
             http_port = 8000 + node_id
             try:
                 # Try to connect to the node
-                response = requests.get(f"http://localhost:{http_port}/", timeout=1)
+                # Node has NODE_PREFIX set, so we need to include it
+                node_prefix = f'/node{node_id}'
+                response = requests.get(f"http://127.0.0.1:{http_port}{node_prefix}/", timeout=1)
                 if response.status_code < 500:  # Accept any non-server error response
                     ready_nodes.add(node_id)
                     print(f"Node {node_id} is ready on port {http_port}")
