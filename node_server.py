@@ -164,12 +164,9 @@ CORS(app)
 
 # Handle URL prefixes for Railway deployment
 node_prefix = os.environ.get('NODE_PREFIX', '')
-if node_prefix:
-    # In Railway deployment, create a blueprint with prefix
-    bp = Blueprint('node', __name__, url_prefix=node_prefix)
-else:
-    # In local development, use the app directly
-    bp = app
+# Since we're running multiple nodes that are proxied, don't use blueprints
+# Just use the app directly in all cases
+bp = app
 
 blockchain = None
 kademlia_node = None
