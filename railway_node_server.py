@@ -22,7 +22,12 @@ def start_node(node_id, http_port, kademlia_port, bootstrap_node=None):
     env = os.environ.copy()
     
     # Determine if we're running in Railway
-    railway_url = 'https://blockchain-bc-production.up.railway.app/'
+    railway_env = os.environ.get('RAILWAY_ENVIRONMENT', '')
+    railway_url = os.environ.get('RAILWAY_STATIC_URL', 'https://blockchain-bc-production.up.railway.app/')
+    
+    # Mark the environment as Railway for child processes
+    if railway_env:
+        env['RAILWAY_ENVIRONMENT'] = railway_env
     
     # Set environment variables for the node
     env['FLASK_RUN_PORT'] = str(http_port)
@@ -116,8 +121,18 @@ def proxy_to_node(node_id, subpath):
     try:
         # Use the correct port for each node
         http_port = 8000 + node_id
-        # Forward to the node server without the node prefix
-        url = f"http://localhost:{http_port}/{subpath}"
+        
+        # Determine if we're in Railway (containerized) environment
+        railway_env = os.environ.get('RAILWAY_ENVIRONMENT', '')
+        
+        if railway_env:
+            # In Railway, use internal container networking
+            # This assumes all the nodes are running in the same environment but different processes
+            # We use 0.0.0.0 to bind to all interfaces
+            url = f"http://0.0.0.0:{http_port}/{subpath}"
+        else:
+            # In local development, use localhost
+            url = f"http://localhost:{http_port}/{subpath}"
         
         print(f"Proxying {request.method} request from {request.path} to {url}")
         

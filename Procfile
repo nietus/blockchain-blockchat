@@ -1,3 +1,1 @@
-node0: FLASK_RUN_PORT=8000 KADEMLIA_PORT=5678 NODE_PREFIX=/node0 python node_server.py
-node1: FLASK_RUN_PORT=8001 KADEMLIA_PORT=5679 NODE_PREFIX=/node1 KADEMLIA_BOOTSTRAP=localhost:5678 python node_server.py
-node2: FLASK_RUN_PORT=8002 KADEMLIA_PORT=5680 NODE_PREFIX=/node2 KADEMLIA_BOOTSTRAP=localhost:5678 python node_server.py 
+web: python railway_node_server.py 
