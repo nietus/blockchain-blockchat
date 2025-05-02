@@ -72,7 +72,7 @@ def initialize_nodes(num_nodes=3):
     node_processes[0] = bootstrap_process
     
     # Wait for bootstrap node to start
-    time.sleep(5)
+    time.sleep(10)  # Increased from 5 to 10 seconds
     
     # Bootstrap connection string for other nodes
     host = socket.gethostname()
@@ -86,10 +86,14 @@ def initialize_nodes(num_nodes=3):
         node_process = start_node(i, http_port, kademlia_port, bootstrap_connection)
         node_processes[i] = node_process
         
-        # Give each node time to start up
-        time.sleep(2)
+        # Give each node time to start up and sync
+        time.sleep(5)  # Increased from 2 to 5 seconds
     
     print(f"Started {num_nodes} blockchain nodes")
+    
+    # Allow extra time for initial chain synchronization
+    print("Allowing extra time for initial chain synchronization...")
+    time.sleep(10)
 
 @app.route('/', methods=['GET'])
 def home():
@@ -97,11 +101,22 @@ def home():
     nodes_info = ""
     for node_id in node_processes:
         prefix = create_node_prefix(node_id)
-        nodes_info += f"<li><a href='{prefix}/chain'>Node {node_id} - View Blockchain</a></li>"
+        nodes_info += f"<li><a href='{prefix}/chain'>Node {node_id} - View Blockchain</a> | <a href='{prefix}/sync_chain'>Sync Chain</a></li>"
     
     return f"""
     <html>
-    <head><title>Multi-Node Blockchain</title></head>
+    <head>
+        <title>Multi-Node Blockchain</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            h1, h2 {{ color: #333; }}
+            ul {{ list-style-type: none; padding: 0; }}
+            li {{ margin-bottom: 10px; }}
+            a {{ color: #0066cc; text-decoration: none; margin-right: 10px; }}
+            a:hover {{ text-decoration: underline; }}
+            .actions {{ margin-top: 20px; }}
+        </style>
+    </head>
     <body>
         <h1>Multi-Node Blockchain Network</h1>
         <p>This is a multi-node blockchain network running on Railway.</p>
@@ -109,6 +124,14 @@ def home():
         <ul>
             {nodes_info}
         </ul>
+        <div class="actions">
+            <h2>Network Actions:</h2>
+            <p>
+                <a href="/chain">View Default Chain</a> | 
+                <a href="/sync_all_chains">Sync All Chains</a> | 
+                <a href="/chain_status">View Chain Status</a>
+            </p>
+        </div>
     </body>
     </html>
     """
@@ -175,6 +198,137 @@ def post_default_transaction():
     """Redirect root-level transaction requests to node0 for convenience"""
     return proxy_to_node(0, "new_transaction")
 
+@app.route('/sync_chain', methods=['GET'])
+def get_default_sync_chain():
+    """Redirect root-level sync_chain requests to node0 for convenience"""
+    return proxy_to_node(0, "sync_chain")
+
+@app.route('/sync_all_chains', methods=['GET'])
+def sync_all_chains():
+    """Trigger synchronization on all nodes"""
+    results = []
+    
+    for node_id in node_processes:
+        try:
+            http_port = 8000 + node_id
+            response = requests.get(f"http://127.0.0.1:{http_port}/sync_chain", timeout=5)
+            results.append(f"Node {node_id}: {response.status_code} - {response.text}")
+        except Exception as e:
+            results.append(f"Node {node_id}: Error - {str(e)}")
+    
+    return f"""
+    <html>
+    <head>
+        <title>Chain Synchronization Results</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            h1 {{ color: #333; }}
+            pre {{ background-color: #f5f5f5; padding: 10px; border-radius: 5px; }}
+            a {{ color: #0066cc; text-decoration: none; }}
+        </style>
+    </head>
+    <body>
+        <h1>Chain Synchronization Results</h1>
+        <pre>{chr(10).join(results)}</pre>
+        <p><a href="/">Back to Home</a> | <a href="/chain_status">View Chain Status</a></p>
+    </body>
+    </html>
+    """
+
+@app.route('/chain_status', methods=['GET'])
+def chain_status():
+    """Show status of all chains"""
+    node_info = []
+    
+    for node_id in node_processes:
+        try:
+            http_port = 8000 + node_id
+            response = requests.get(f"http://127.0.0.1:{http_port}/chain", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                chain_length = data.get('length', 0)
+                chain_hash = "None"
+                if data.get('chain') and len(data['chain']) > 0:
+                    chain_hash = data['chain'][-1].get('hash', 'Unknown')[:10]
+                node_info.append({
+                    'id': node_id,
+                    'length': chain_length,
+                    'latest_hash': chain_hash,
+                    'status': 'Online'
+                })
+            else:
+                node_info.append({
+                    'id': node_id,
+                    'length': 'N/A',
+                    'latest_hash': 'N/A',
+                    'status': f'Error {response.status_code}'
+                })
+        except Exception as e:
+            node_info.append({
+                'id': node_id,
+                'length': 'N/A',
+                'latest_hash': 'N/A',
+                'status': f'Error: {str(e)}'
+            })
+    
+    # Create HTML table
+    table_rows = ""
+    for node in node_info:
+        table_rows += f"""
+        <tr>
+            <td>{node['id']}</td>
+            <td>{node['length']}</td>
+            <td>{node['latest_hash']}</td>
+            <td>{node['status']}</td>
+            <td><a href="/node{node['id']}/chain">View Chain</a> | <a href="/node{node['id']}/sync_chain">Sync Chain</a></td>
+        </tr>
+        """
+    
+    return f"""
+    <html>
+    <head>
+        <title>Blockchain Network Status</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            h1, h2 {{ color: #333; }}
+            table {{ border-collapse: collapse; width: 100%; margin-top: 20px; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+            tr:nth-child(even) {{ background-color: #f9f9f9; }}
+            tr:hover {{ background-color: #e9e9e9; }}
+            .actions {{ margin-top: 20px; }}
+            a {{ color: #0066cc; text-decoration: none; margin-right: 10px; }}
+            a:hover {{ text-decoration: underline; }}
+            .refresh {{ background-color: #4CAF50; color: white; padding: 10px 15px; border: none; 
+                      border-radius: 4px; cursor: pointer; margin-top: 20px; }}
+            .refresh:hover {{ background-color: #45a049; }}
+        </style>
+        <meta http-equiv="refresh" content="10">
+    </head>
+    <body>
+        <h1>Blockchain Network Status</h1>
+        <p>This page auto-refreshes every 10 seconds to show the current state of all nodes.</p>
+        
+        <table>
+            <tr>
+                <th>Node ID</th>
+                <th>Chain Length</th>
+                <th>Latest Block Hash</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+            {table_rows}
+        </table>
+        
+        <div class="actions">
+            <a href="/">Back to Home</a> | 
+            <a href="/sync_all_chains">Sync All Chains</a> | 
+            <a href="/chain_status">Refresh Now</a>
+        </div>
+    </body>
+    </html>
+    """
+
 def signal_handler(sig, frame):
     """Handle graceful shutdown"""
     print("Shutting down all nodes...")
@@ -183,7 +337,7 @@ def signal_handler(sig, frame):
             process.terminate()
     sys.exit(0)
 
-def wait_for_nodes_to_be_ready(timeout=60):
+def wait_for_nodes_to_be_ready(timeout=90):  # Increased timeout from 60 to 90 seconds
     """Wait for all nodes to be ready and responding"""
     start_time = time.time()
     ready_nodes = set()
@@ -212,6 +366,18 @@ def wait_for_nodes_to_be_ready(timeout=60):
     
     if len(ready_nodes) == len(node_processes):
         print("All nodes are ready!")
+        
+        # Add an explicit call to check node chain consistency
+        print("Initiating chain synchronization check for all nodes...")
+        for node_id in range(1, len(node_processes)):
+            try:
+                # Request consensus check on each non-bootstrap node
+                http_port = 8000 + node_id
+                response = requests.get(f"http://127.0.0.1:{http_port}/sync_chain", timeout=5)
+                print(f"Node {node_id} chain sync initiated: {response.status_code}")
+            except Exception as e:
+                print(f"Error initiating chain sync for node {node_id}: {e}")
+        
         return True
     else:
         print(f"Timed out waiting for nodes. Only {len(ready_nodes)}/{len(node_processes)} nodes are ready.")

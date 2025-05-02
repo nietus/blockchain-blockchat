@@ -152,6 +152,8 @@ class Blockchain:
         if self.add_block(new_block, proof):
             logger.info(f"Successfully mined and added block {new_block.index}")
             self.unconfirmed_transactions = []
+            # Save the chain after mining a block
+            save_chain()
             announce_new_block(new_block.to_dict())
             return new_block.index
         else:
@@ -287,7 +289,21 @@ def load_chain():
              blockchain = Blockchain()
     else:
         logger.info("No saved blockchain found or load failed. Creating genesis block.")
-        blockchain = Blockchain() 
+        blockchain = Blockchain()
+    
+    # Schedule initial consensus check to sync with network after startup
+    if kademlia_node and kademlia_node.running:
+        logger.info("Scheduling initial blockchain consensus to sync with network after startup")
+        def schedule_initial_consensus():
+            time.sleep(10)  # Wait for kademlia to discover peers
+            if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+                try:
+                    asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
+                    logger.info("Initial consensus check scheduled successfully")
+                except Exception as e:
+                    logger.error(f"Failed to schedule initial consensus: {e}")
+        
+        threading.Thread(target=schedule_initial_consensus, daemon=True).start()
 
 def graceful_shutdown():
      logger.info("Initiating graceful shutdown...")
@@ -410,25 +426,78 @@ def verify_and_add_block():
              logger.warning(f"Received block data missing keys: {block_data}")
              return "Invalid block data received", 400
 
+        # Check if we already have this block by hash
         if any(b.index == block_data['index'] and b.hash == block_data['hash'] for b in blockchain.chain):
+             logger.info(f"Block #{block_data['index']} with hash {block_data['hash'][:8]}... already exists. Ignoring.")
              return "Block already exists", 200
              
         last_block = blockchain.last_block
+        
+        # Case 1: Block connects directly to our chain
         if block_data['previous_hash'] == last_block.hash and block_data['index'] == last_block.index + 1:
+            logger.info(f"Received block #{block_data['index']} connects directly to our chain. Adding...")
             block = Block(block_data['index'], block_data['transactions'], block_data['timestamp'],
                           block_data['previous_hash'], block_data['nonce'])
             if blockchain.add_block(block, block_data['hash']):
-                 logger.info(f"Received block {block.index} added sequentially.")
+                 logger.info(f"Successfully added block #{block.index} with hash {block_data['hash'][:8]}... to chain")
+                 save_chain()  # Save chain after successful addition
                  return "Block added to the chain", 201
             else:
-                 logger.warning(f"Received block {block.index} failed validation.")
+                 logger.warning(f"Received block #{block.index} failed validation")
                  return "Block rejected by node (validation failed)", 400
-        elif block_data['index'] > last_block.index:
-             logger.warning(f"Received block {block_data['index']} which is ahead of local chain (length {len(blockchain.chain)}). Triggering consensus.")
-             asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop if kademlia_node else asyncio.get_event_loop())
-             return "Received block from longer chain, running consensus", 202
+        
+        # Case 2: We're behind - the new block builds on something we don't have
+        elif block_data['index'] > last_block.index + 1:
+            logger.warning(f"Received block #{block_data['index']} but we're at #{last_block.index}. We're behind.")
+            # We've missed some blocks, need to sync
+            if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+                logger.info("Triggering immediate consensus due to received advanced block")
+                future = asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
+                try:
+                    synced = future.result(timeout=10)
+                    if synced:
+                        logger.info(f"Chain successfully synced. New length: {len(blockchain.chain)}")
+                        # After syncing, try to add the block again if we still don't have it
+                        if not any(b.hash == block_data['hash'] for b in blockchain.chain):
+                            logger.info("Attempting to add received block after sync")
+                            # Check if we can add it now
+                            last_block = blockchain.last_block
+                            if block_data['previous_hash'] == last_block.hash and block_data['index'] == last_block.index + 1:
+                                block = Block(block_data['index'], block_data['transactions'], 
+                                              block_data['timestamp'], block_data['previous_hash'], 
+                                              block_data['nonce'])
+                                if blockchain.add_block(block, block_data['hash']):
+                                    logger.info(f"Block #{block.index} added after sync")
+                                    save_chain()
+                                    return "Block added after chain sync", 201
+                    else:
+                        logger.warning("Chain sync completed but still can't add block")
+                        return "Block accepted but chain sync didn't reach it yet", 202
+                except asyncio.TimeoutError:
+                    logger.error("Timeout during sync chain in add_block")
+                    return "Chain sync timed out, try again later", 202
+                except Exception as e:
+                    logger.error(f"Error syncing chain in add_block: {e}")
+            
+            return "Block acknowledged, chain syncing", 202
+            
+        # Case 3: Block is from a fork or alternative chain (same index but different content)
+        elif block_data['index'] == last_block.index and block_data['hash'] != last_block.hash:
+            logger.warning(f"Received block #{block_data['index']} appears to be from a fork. Triggering consensus.")
+            # We might be on a fork, need to determine the canonical chain
+            if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+                asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
+            return "Block from potential fork received, running consensus", 202
+            
+        # Case 4: Received an older block
+        elif block_data['index'] < last_block.index:
+            logger.info(f"Received block #{block_data['index']} which is older than our chain head #{last_block.index}")
+            return "Block is older than current chain head", 200
+        
+        # Case 5: Received a block at same index but doesn't connect
         else:
-             return "Block is older than current chain head", 200
+            logger.warning(f"Received block #{block_data['index']} doesn't connect to our chain properly")
+            return "Block doesn't connect to current chain", 400
 
     except Exception as e:
         logger.error(f"Error processing received block: {e}", exc_info=True)
@@ -439,6 +508,34 @@ def get_pending_tx():
      if not blockchain:
           return "Blockchain not initialized", 500
      return json.dumps(blockchain.unconfirmed_transactions)
+
+@bp.route('/sync_chain', methods=['GET'])
+@bp.route('/sync_chain/', methods=['GET'])
+@bp.route('/node<int:node_id>/sync_chain', methods=['GET'])
+@bp.route('/node<int:node_id>/sync_chain/', methods=['GET'])
+def sync_blockchain():
+    """Explicitly trigger blockchain synchronization via consensus"""
+    if not blockchain:
+        return "Blockchain not initialized", 500
+    
+    if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+        try:
+            logger.info("Explicitly triggering blockchain synchronization")
+            future = asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
+            result = future.result(timeout=10)
+            if result:
+                return "Blockchain successfully synchronized with network", 200
+            else:
+                return "Synchronization completed, no updates needed", 200
+        except asyncio.TimeoutError:
+            logger.error("Timeout during explicit blockchain synchronization")
+            return "Synchronization timed out, try again later", 500
+        except Exception as e:
+            logger.error(f"Error during explicit blockchain synchronization: {e}")
+            return f"Synchronization error: {str(e)}", 500
+    else:
+        logger.error("Cannot sync blockchain: Kademlia node not running")
+        return "Cannot sync - P2P network node not running", 500
 
 async def consensus():
     global blockchain
@@ -463,7 +560,7 @@ async def consensus():
     
     valid_peer_chains = []
     for i, result in enumerate(results):
-         peer_node = list(active_peers)[i]
+         peer_node = list(active_peers)[i] if i < len(active_peers) else "unknown"
          if isinstance(result, Exception):
               logger.warning(f"Consensus error fetching chain from {peer_node}: {result}")
          elif result:
@@ -487,23 +584,40 @@ async def fetch_chain_from_peer(node_address):
      logger.debug(f"Fetching chain from {node_address}...")
      try:
           loop = asyncio.get_running_loop()
-          response = await loop.run_in_executor(None, lambda: requests.get(f'{node_address}/chain', timeout=5))
+          response = await loop.run_in_executor(None, lambda: requests.get(f'{node_address}/chain', timeout=10))  # Increased timeout from 5 to 10 seconds
           response.raise_for_status() 
           data = response.json()
-          length = data['length']
-          chain_dump = data['chain']
+          length = data.get('length', 0)
+          chain_dump = data.get('chain', [])
           
+          if not chain_dump:
+               logger.warning(f"Received empty chain from {node_address}")
+               return None
+          
+          # Create Block objects for validation
           chain_objects = []
-          for block_data in chain_dump:
-                block = Block(block_data['index'], block_data['transactions'], block_data['timestamp'],
-                              block_data['previous_hash'], block_data['nonce'])
-                block.hash = block_data['hash']
-                chain_objects.append(block)
-                
-          if Blockchain.check_chain_validity(chain_objects):
-               return length, chain_objects
-          else:
-               logger.warning(f"Received invalid chain from {node_address}")
+          try:
+               for block_data in chain_dump:
+                    block = Block(block_data['index'], block_data['transactions'], block_data['timestamp'],
+                                 block_data['previous_hash'], block_data['nonce'])
+                    block.hash = block_data['hash']
+                    chain_objects.append(block)
+                    
+               if not chain_objects:
+                    logger.warning(f"Failed to convert chain data from {node_address} to Block objects")
+                    return None
+                    
+               if Blockchain.check_chain_validity(chain_objects):
+                    logger.info(f"Received valid chain of length {length} from {node_address}")
+                    return length, chain_objects
+               else:
+                    logger.warning(f"Received invalid chain from {node_address}")
+                    return None
+          except KeyError as e:
+               logger.error(f"Missing key in block data from {node_address}: {e}")
+               return None
+          except Exception as e:
+               logger.error(f"Error processing chain data from {node_address}: {e}")
                return None
      except requests.exceptions.Timeout:
           logger.warning(f"Timeout fetching chain from {node_address}")
@@ -528,16 +642,35 @@ def announce_new_block(block_dict):
     block_json = json.dumps(block_dict, sort_keys=True)
     headers = {'Content-Type': "application/json"}
 
+    announcements_sent = 0
     for node in active_peers:
          if node == this_node_http_address: continue
          thread = threading.Thread(target=send_announcement, args=(node, block_json, headers), daemon=True)
          thread.start()
+         announcements_sent += 1
+    
+    logger.info(f"Sent {announcements_sent} block announcements to peers")
+    
+    # Give some time for announcements to be processed, then check consensus
+    def delayed_consensus_check():
+        try:
+            time.sleep(5)  # Wait for announcements to be processed
+            if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+                logger.info("Running post-mining consensus check to ensure network synchronization")
+                asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
+        except Exception as e:
+            logger.error(f"Error in delayed consensus check: {e}")
+    
+    threading.Thread(target=delayed_consensus_check, daemon=True).start()
 
 def send_announcement(node_address, data, headers):
      url = f"{node_address}/add_block"
      try:
-          response = requests.post(url, data=data, headers=headers, timeout=3)
-          logger.debug(f"Announced block to {node_address}: Status {response.status_code}")
+          response = requests.post(url, data=data, headers=headers, timeout=5)  # Increased timeout from 3 to 5 seconds
+          if response.status_code == 201:
+              logger.info(f"Successfully announced block to {node_address}")
+          else:
+              logger.warning(f"Block announcement to {node_address} returned status {response.status_code}: {response.text}")
      except requests.exceptions.Timeout:
           logger.warning(f"Timeout announcing block to {node_address}")
      except requests.exceptions.RequestException as e:
@@ -548,6 +681,20 @@ def send_announcement(node_address, data, headers):
 if __name__ == '__main__':
     load_chain() 
     setup_and_run_kademlia()
+    
+    # Schedule periodic consensus checks
+    def schedule_periodic_consensus():
+        while True:
+            try:
+                time.sleep(60)  # Run consensus every 60 seconds
+                if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+                    asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
+                    logger.info("Periodic consensus check executed")
+            except Exception as e:
+                logger.error(f"Error in periodic consensus: {e}")
+    
+    consensus_thread = threading.Thread(target=schedule_periodic_consensus, daemon=True)
+    consensus_thread.start()
     
     # Railway provides PORT environment variable
     port = int(os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 8000)))
