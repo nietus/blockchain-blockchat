@@ -110,6 +110,7 @@ def home():
     </html>
     """
 
+@app.route('/node<int:node_id>/', defaults={'subpath': ''}, methods=['GET', 'POST', 'PUT', 'DELETE'])
 @app.route('/node<int:node_id>/<path:subpath>', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def proxy_to_node(node_id, subpath):
     """Proxy requests to the appropriate node"""
@@ -122,9 +123,13 @@ def proxy_to_node(node_id, subpath):
         # Use the correct port for each node
         http_port = 8000 + node_id
         
-        # Forward directly to the internal node port - no prefix needed
-        # The node will handle the routing itself via Flask's blueprint mechanisms
-        url = f"http://127.0.0.1:{http_port}/{subpath}"
+        # Forward directly to the node's endpoint
+        # Remove trailing slash to avoid double-slash issues
+        if subpath:
+            url = f"http://127.0.0.1:{http_port}/{subpath}"
+        else:
+            # Root path case
+            url = f"http://127.0.0.1:{http_port}/"
         
         print(f"Proxying {request.method} request from {request.path} to {url}")
         
@@ -151,6 +156,21 @@ def proxy_to_node(node_id, subpath):
     except Exception as e:
         print(f"Error proxying request to Node {node_id} at port {http_port}: {str(e)}")
         return f"Error proxying request to Node {node_id}: {str(e)}", 500
+
+@app.route('/chain', methods=['GET'])
+def get_default_chain():
+    """Redirect root-level chain requests to node0's chain for convenience"""
+    return proxy_to_node(0, "chain")
+
+@app.route('/mine', methods=['GET'])
+def get_default_mine():
+    """Redirect root-level mine requests to node0 for convenience"""
+    return proxy_to_node(0, "mine")
+
+@app.route('/new_transaction', methods=['POST'])
+def post_default_transaction():
+    """Redirect root-level transaction requests to node0 for convenience"""
+    return proxy_to_node(0, "new_transaction")
 
 def signal_handler(sig, frame):
     """Handle graceful shutdown"""

@@ -162,14 +162,11 @@ class Blockchain:
 app = Flask(__name__)
 CORS(app)
 
-# Handle URL prefixes for Railway deployment
+# Keep track of node prefix for informational purposes
 node_prefix = os.environ.get('NODE_PREFIX', '')
-if node_prefix:
-    # In Railway deployment, create a blueprint with prefix
-    bp = Blueprint('node', __name__, url_prefix=node_prefix)
-else:
-    # In local development, use the app directly
-    bp = app
+
+# No blueprints - register all routes directly on app
+bp = app
 
 blockchain = None
 kademlia_node = None
@@ -301,6 +298,7 @@ def graceful_shutdown():
 atexit.register(graceful_shutdown)
 
 @bp.route('/', methods=['GET'])
+@bp.route('/node<int:node_id>/', methods=['GET'])
 def home():
     """Home endpoint for health checks"""
     if not blockchain:
@@ -308,6 +306,9 @@ def home():
     return f"Blockchain node is running. Chain length: {len(blockchain.chain)}", 200
 
 @bp.route('/new_transaction', methods=['POST'])
+@bp.route('/new_transaction/', methods=['POST'])
+@bp.route('/node<int:node_id>/new_transaction', methods=['POST'])
+@bp.route('/node<int:node_id>/new_transaction/', methods=['POST'])
 def new_transaction():
     if not blockchain:
          return "Blockchain not initialized", 500
@@ -328,6 +329,9 @@ def new_transaction():
          return "Invalid transaction data", 400
 
 @bp.route('/chain', methods=['GET'])
+@bp.route('/chain/', methods=['GET'])
+@bp.route('/node<int:node_id>/chain', methods=['GET'])
+@bp.route('/node<int:node_id>/chain/', methods=['GET'])
 def get_chain():
     if not blockchain:
          return "Blockchain not initialized", 500
@@ -338,6 +342,9 @@ def get_chain():
                        "peers": list(active_peers) })
 
 @bp.route('/mine', methods=['GET'])
+@bp.route('/mine/', methods=['GET'])
+@bp.route('/node<int:node_id>/mine', methods=['GET'])
+@bp.route('/node<int:node_id>/mine/', methods=['GET'])
 def mine_unconfirmed_transactions():
     if not blockchain:
          return "Blockchain not initialized", 500
@@ -536,10 +543,6 @@ def send_announcement(node_address, data, headers):
           logger.warning(f"Failed to announce block to {node_address}: {e}")
      except Exception as e:
           logger.error(f"Unexpected error announcing block to {node_address}: {e}")
-
-# Register blueprint if using prefixes
-if node_prefix:
-    app.register_blueprint(bp)
 
 if __name__ == '__main__':
     load_chain() 
