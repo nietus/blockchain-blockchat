@@ -160,7 +160,8 @@ class Blockchain:
 
 
 app = Flask(__name__)
-CORS(app)
+# Set up CORS to allow requests from any origin
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # Keep track of node prefix for informational purposes
 node_prefix = os.environ.get('NODE_PREFIX', '')

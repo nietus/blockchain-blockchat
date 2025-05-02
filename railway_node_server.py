@@ -7,8 +7,11 @@ import signal
 import socket
 from flask import Flask, request, Response
 import requests
+from flask_cors import CORS
 
 app = Flask(__name__)
+# Enable CORS for all routes and origins
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 def create_node_prefix(node_id):
     """Create a URL prefix for a node"""
