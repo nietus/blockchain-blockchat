@@ -176,7 +176,7 @@ kademlia_node = None
 kademlia_thread = None
 
 # Handle Railway deployment URL
-railway_url = os.environ.get('RAILWAY_STATIC_URL', '')
+railway_url = 'blockchain-bc-production.up.railway.app'
 port = os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 8000))
 
 if railway_url:

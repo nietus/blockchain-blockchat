@@ -13,7 +13,7 @@ def run_node(node_id, http_port, kademlia_port, bootstrap_node=None):
     # Determine if we're running in Railway
     in_railway = 'RAILWAY_STATIC_URL' in os.environ
     main_port = os.environ.get('PORT', '8080')  # Railway assigns this PORT
-    railway_url = os.environ.get('RAILWAY_STATIC_URL', '')
+    railway_url = 'blockchain-bc-production.up.railway.app'
     
     if in_railway:
         # In Railway, we use the same port but different URL paths

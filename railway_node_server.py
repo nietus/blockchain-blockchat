@@ -22,7 +22,7 @@ def start_node(node_id, http_port, kademlia_port, bootstrap_node=None):
     env = os.environ.copy()
     
     # Determine if we're running in Railway
-    railway_url = os.environ.get('RAILWAY_STATIC_URL', '')
+    railway_url = 'https://blockchain-bc-production.up.railway.app/'
     
     # Set environment variables for the node
     env['FLASK_RUN_PORT'] = str(http_port)
@@ -31,6 +31,9 @@ def start_node(node_id, http_port, kademlia_port, bootstrap_node=None):
     
     # Set HTTP address
     if railway_url:
+        # Fix the double slash by ensuring railway_url doesn't end with a slash
+        if railway_url.endswith('/'):
+            railway_url = railway_url[:-1]
         env['HTTP_NODE_ADDRESS'] = f"{railway_url}/node{node_id}"
     else:
         env['HTTP_NODE_ADDRESS'] = f"http://127.0.0.1:{http_port}"
@@ -113,6 +116,7 @@ def proxy_to_node(node_id, subpath):
     try:
         # Use the correct port for each node
         http_port = 8000 + node_id
+        # Forward to the node server without the node prefix
         url = f"http://localhost:{http_port}/{subpath}"
         
         print(f"Proxying {request.method} request from {request.path} to {url}")
