@@ -122,9 +122,9 @@ def proxy_to_node(node_id, subpath):
         # Use the correct port for each node
         http_port = 8000 + node_id
         
-        # Include node prefix in URL path for routing through the blueprint
-        node_prefix = f"/node{node_id}"
-        url = f"http://127.0.0.1:{http_port}{node_prefix}/{subpath}"
+        # Forward directly to the internal node port - no prefix needed
+        # The node will handle the routing itself via Flask's blueprint mechanisms
+        url = f"http://127.0.0.1:{http_port}/{subpath}"
         
         print(f"Proxying {request.method} request from {request.path} to {url}")
         
@@ -174,9 +174,9 @@ def wait_for_nodes_to_be_ready(timeout=60):
                 
             http_port = 8000 + node_id
             try:
-                # Try to connect to the node with its node prefix
-                node_prefix = f"/node{node_id}"
-                response = requests.get(f"http://127.0.0.1:{http_port}{node_prefix}/", timeout=1)
+                # Try to connect to the node's root endpoint
+                # This works with the Flask blueprint routing
+                response = requests.get(f"http://127.0.0.1:{http_port}/", timeout=1)
                 if response.status_code < 500:  # Accept any non-server error response
                     ready_nodes.add(node_id)
                     print(f"Node {node_id} is ready on port {http_port}")
