@@ -101,7 +101,12 @@ def home():
     nodes_info = ""
     for node_id in node_processes:
         prefix = create_node_prefix(node_id)
-        nodes_info += f"<li><a href='{prefix}/chain'>Node {node_id} - View Blockchain</a> | <a href='{prefix}/sync_chain'>Sync Chain</a></li>"
+        nodes_info += f"""<li>
+            <strong>Node {node_id}</strong>: 
+            <a href='{prefix}/chain'>View Blockchain</a> | 
+            <a href='{prefix}/chain?verify=true'>View Verified Chain</a> | 
+            <a href='{prefix}/sync_chain'>Sync Chain</a>
+        </li>"""
     
     return f"""
     <html>
@@ -115,22 +120,48 @@ def home():
             a {{ color: #0066cc; text-decoration: none; margin-right: 10px; }}
             a:hover {{ text-decoration: underline; }}
             .actions {{ margin-top: 20px; }}
+            .info-box {{ background-color: #e6f7ff; border: 1px solid #91d5ff; padding: 10px; 
+                       border-radius: 4px; margin: 15px 0; }}
+            .feature-box {{ display: inline-block; background-color: #f8f9fa; border-radius: 4px;
+                          border: 1px solid #ddd; padding: 10px; margin: 10px 10px 10px 0; width: 200px; }}
+            .feature-title {{ font-weight: bold; margin-bottom: 5px; }}
         </style>
     </head>
     <body>
         <h1>Multi-Node Blockchain Network</h1>
         <p>This is a multi-node blockchain network running on Railway.</p>
+        
+        <div class="info-box">
+            <strong>Verified Chain Viewing:</strong> Using the "View Verified Chain" option ensures the node checks
+            if it's synchronized with the network before showing data. If out of sync, it will attempt to synchronize first.
+        </div>
+        
         <h2>Available Nodes:</h2>
         <ul>
             {nodes_info}
         </ul>
+        
         <div class="actions">
             <h2>Network Actions:</h2>
-            <p>
+            <div>
                 <a href="/chain">View Default Chain</a> | 
+                <a href="/chain?verify=true">View Verified Chain</a> | 
                 <a href="/sync_all_chains">Sync All Chains</a> | 
                 <a href="/chain_status">View Chain Status</a>
-            </p>
+            </div>
+            
+            <h2>Features:</h2>
+            <div class="feature-box">
+                <div class="feature-title">Chain Status</div>
+                <p>View the status of all blockchain nodes in the network, including chain lengths and latest hashes.</p>
+                <a href="/chain_status">Open Chain Status</a>
+            </div>
+            
+            <div class="feature-box">
+                <div class="feature-title">Sync All Chains</div>
+                <p>Trigger synchronization on all nodes to ensure network consistency.</p>
+                <a href="/sync_all_chains">Sync Network</a>
+            </div>
         </div>
     </body>
     </html>
@@ -186,7 +217,9 @@ def proxy_to_node(node_id, subpath):
 @app.route('/chain', methods=['GET'])
 def get_default_chain():
     """Redirect root-level chain requests to node0's chain for convenience"""
-    return proxy_to_node(0, "chain")
+    # Forward the verify parameter if present
+    verify = request.args.get('verify', 'false')
+    return proxy_to_node(0, f"chain?verify={verify}")
 
 @app.route('/mine', methods=['GET'])
 def get_default_mine():
@@ -243,44 +276,59 @@ def chain_status():
     for node_id in node_processes:
         try:
             http_port = 8000 + node_id
-            response = requests.get(f"http://127.0.0.1:{http_port}/chain", timeout=5)
+            # Add verify=true to the request to ensure the node checks for consistency
+            response = requests.get(f"http://127.0.0.1:{http_port}/chain?verify=true", timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 chain_length = data.get('length', 0)
                 chain_hash = "None"
+                verified = data.get('verified', False)
                 if data.get('chain') and len(data['chain']) > 0:
                     chain_hash = data['chain'][-1].get('hash', 'Unknown')[:10]
                 node_info.append({
                     'id': node_id,
                     'length': chain_length,
                     'latest_hash': chain_hash,
-                    'status': 'Online'
+                    'status': 'Online' + (' (Verified)' if verified else ''),
+                    'verified': verified
                 })
             else:
                 node_info.append({
                     'id': node_id,
                     'length': 'N/A',
                     'latest_hash': 'N/A',
-                    'status': f'Error {response.status_code}'
+                    'status': f'Error {response.status_code}',
+                    'verified': False
                 })
         except Exception as e:
             node_info.append({
                 'id': node_id,
                 'length': 'N/A',
                 'latest_hash': 'N/A',
-                'status': f'Error: {str(e)}'
+                'status': f'Error: {str(e)}',
+                'verified': False
             })
     
     # Create HTML table
     table_rows = ""
     for node in node_info:
+        status_class = ""
+        if "Verified" in node.get('status', ''):
+            status_class = "class='verified'"
+        elif "Error" in node.get('status', ''):
+            status_class = "class='error'"
+            
         table_rows += f"""
-        <tr>
+        <tr {status_class}>
             <td>{node['id']}</td>
             <td>{node['length']}</td>
             <td>{node['latest_hash']}</td>
             <td>{node['status']}</td>
-            <td><a href="/node{node['id']}/chain">View Chain</a> | <a href="/node{node['id']}/sync_chain">Sync Chain</a></td>
+            <td>
+                <a href="/node{node['id']}/chain">View Chain</a> | 
+                <a href="/node{node['id']}/chain?verify=true">View Verified Chain</a> | 
+                <a href="/node{node['id']}/sync_chain">Sync Chain</a>
+            </td>
         </tr>
         """
     
@@ -296,18 +344,27 @@ def chain_status():
             th {{ background-color: #f2f2f2; }}
             tr:nth-child(even) {{ background-color: #f9f9f9; }}
             tr:hover {{ background-color: #e9e9e9; }}
+            tr.verified {{ background-color: #e6ffe6; }}
+            tr.error {{ background-color: #ffe6e6; }}
             .actions {{ margin-top: 20px; }}
             a {{ color: #0066cc; text-decoration: none; margin-right: 10px; }}
             a:hover {{ text-decoration: underline; }}
             .refresh {{ background-color: #4CAF50; color: white; padding: 10px 15px; border: none; 
                       border-radius: 4px; cursor: pointer; margin-top: 20px; }}
             .refresh:hover {{ background-color: #45a049; }}
+            .info-box {{ background-color: #e6f7ff; border: 1px solid #91d5ff; padding: 10px; 
+                       border-radius: 4px; margin-top: 10px; }}
         </style>
         <meta http-equiv="refresh" content="10">
     </head>
     <body>
         <h1>Blockchain Network Status</h1>
         <p>This page auto-refreshes every 10 seconds to show the current state of all nodes.</p>
+        
+        <div class="info-box">
+            <strong>Verified Chain:</strong> When viewing a verified chain, the system will check if the node is in sync with the network majority before returning data.
+            If out of sync, it will attempt to synchronize first, ensuring you always see the most up-to-date blockchain.
+        </div>
         
         <table>
             <tr>

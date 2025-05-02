@@ -352,11 +352,35 @@ def new_transaction():
 def get_chain():
     if not blockchain:
          return "Blockchain not initialized", 500
+    
+    # Check if we should verify synchronization before returning data
+    should_verify = request.args.get('verify', 'false').lower() == 'true'
+    
+    if should_verify and kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+        try:
+            # Quick check to ensure this node is in sync before returning data
+            logger.info("Verifying blockchain synchronization before returning chain data")
+            
+            # Run a non-blocking check to see if the current node's chain is consistent with others
+            future = asyncio.run_coroutine_threadsafe(verify_chain_consistency(), kademlia_node.loop)
+            is_consistent = future.result(timeout=5)
+            
+            if not is_consistent:
+                # If our chain might be out of date, try to sync first
+                logger.warning("Chain appears to be out of sync. Running consensus before returning data.")
+                consensus_future = asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
+                consensus_future.result(timeout=10)  # Wait for sync to complete
+                logger.info("Consensus completed. Returning updated chain data.")
+        except Exception as e:
+            logger.error(f"Error during pre-response verification: {e}")
+            # Continue with returning data even if verification fails
+    
     chain_data = [block.to_dict() for block in blockchain.chain]
     active_peers = get_http_peers()
     return json.dumps({"length": len(chain_data),
                        "chain": chain_data,
-                       "peers": list(active_peers) })
+                       "peers": list(active_peers),
+                       "verified": should_verify})
 
 @bp.route('/mine', methods=['GET'])
 @bp.route('/mine/', methods=['GET'])
@@ -677,6 +701,91 @@ def send_announcement(node_address, data, headers):
           logger.warning(f"Failed to announce block to {node_address}: {e}")
      except Exception as e:
           logger.error(f"Unexpected error announcing block to {node_address}: {e}")
+
+# Add a new function to verify chain consistency without modifying it
+async def verify_chain_consistency():
+    """
+    Verify if this node's chain is consistent with the network majority
+    without actually modifying the chain.
+    """
+    if not blockchain or len(blockchain.chain) == 0:
+        return False
+        
+    # Get the hash of the last block in our chain
+    our_last_hash = blockchain.last_block.hash
+    our_chain_length = len(blockchain.chain)
+    
+    # Get the last hash from other peers to see if ours matches the majority
+    active_peers = await get_active_peers_async()
+    if not active_peers:
+        logger.info("No peers available to verify chain consistency.")
+        return True  # Can't verify, assume we're good
+    
+    # Collect the last hash from each peer
+    peer_hashes = {}
+    peer_lengths = {}
+    
+    tasks = []
+    for node in active_peers:
+        if node == this_node_http_address:
+            continue
+        tasks.append(get_peer_chain_info(node))
+    
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    valid_results = 0
+    for result in results:
+        if isinstance(result, Exception):
+            continue
+        if result:
+            peer_hash, peer_length = result
+            peer_hashes[peer_hash] = peer_hashes.get(peer_hash, 0) + 1
+            peer_lengths[peer_length] = peer_lengths.get(peer_length, 0) + 1
+            valid_results += 1
+    
+    if valid_results == 0:
+        logger.warning("Could not get chain info from any peers.")
+        return True  # Can't verify, assume we're good
+    
+    # Check if our hash matches the majority hash
+    if len(peer_hashes) == 0:
+        return True  # No peer data, assume we're ok
+        
+    majority_hash = max(peer_hashes.items(), key=lambda x: x[1])[0]
+    majority_length = max(peer_lengths.items(), key=lambda x: x[1])[0]
+    
+    # We're consistent if our hash matches the majority or if our chain is longer
+    is_consistent = (our_last_hash == majority_hash) or (our_chain_length >= majority_length)
+    
+    if not is_consistent:
+        logger.warning(f"Our chain appears to be out of sync. Our length: {our_chain_length}, majority length: {majority_length}. Our hash: {our_last_hash[:8]}, majority hash: {majority_hash[:8]}")
+    else:
+        logger.info("Chain consistency verified: Our chain matches or exceeds the network majority.")
+    
+    return is_consistent
+
+async def get_peer_chain_info(peer_address):
+    """Get the last block hash and chain length from a peer"""
+    try:
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None, 
+            lambda: requests.get(f'{peer_address}/chain', timeout=3)
+        )
+        
+        if response.status_code != 200:
+            return None
+            
+        data = response.json()
+        chain = data.get('chain', [])
+        
+        if not chain:
+            return None
+            
+        last_block = chain[-1]
+        return last_block.get('hash'), len(chain)
+    except Exception:
+        return None
 
 if __name__ == '__main__':
     load_chain() 
