@@ -8,6 +8,7 @@ import threading
 import time
 from kademlia.network import Server
 from kademlia.utils import digest
+from kademlia.node import Node
 
 class KademliaNode:
     def __init__(self, port=5678, bootstrap_nodes=None, http_address=None):
@@ -52,13 +53,38 @@ class KademliaNode:
                     if hasattr(self.server.protocol, 'router'):
                         # Handle different versions of the API (with or without underscores)
                         router = self.server.protocol.router
-                        if hasattr(router, 'find_neighbors'):
-                            neighbors = router.find_neighbors(key, exclude=source)
-                        elif hasattr(router, 'findNeighbors'):  # older version
-                            neighbors = router.findNeighbors(key, exclude=source)
-                        else:
-                            print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                        
+                        # Convert key to Node object if it's not already one
+                        try:
+                            if isinstance(key, bytes):
+                                # Ensure key is proper length for Node initialization
+                                if len(key) != 20:  # Standard Kademlia ID length
+                                    # Hash it to get consistent length
+                                    key = digest(key)
+                                key_node = Node(key)
+                            else:
+                                # If it's not bytes, try to encode it first
+                                if isinstance(key, str):
+                                    key_bytes = key.encode('utf-8')
+                                    if len(key_bytes) != 20:
+                                        key_bytes = digest(key_bytes)
+                                    key_node = Node(key_bytes)
+                                else:
+                                    key_node = key
+                                
+                            print(f"Created Node object for key: {type(key_node)}")
+                            
+                            if hasattr(router, 'find_neighbors'):
+                                neighbors = router.find_neighbors(key_node, exclude=source)
+                            elif hasattr(router, 'findNeighbors'):  # older version
+                                neighbors = router.findNeighbors(key_node, exclude=source)
+                            else:
+                                print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                                neighbors = []
+                        except Exception as e:
+                            print(f"Error creating Node for key or finding neighbors: {e}")
                             neighbors = []
+                            
                         return {'nodes': neighbors}
                     return {'nodes': []}
                 setattr(self.server.protocol, 'rpc_callFindValue', rpc_callFindValue)
@@ -71,13 +97,38 @@ class KademliaNode:
                     if hasattr(self.server.protocol, 'router'):
                         # Handle different versions of the API (with or without underscores)
                         router = self.server.protocol.router
-                        if hasattr(router, 'find_neighbors'):
-                            neighbors = router.find_neighbors(key, exclude=source)
-                        elif hasattr(router, 'findNeighbors'):  # older version
-                            neighbors = router.findNeighbors(key, exclude=source)
-                        else:
-                            print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                        
+                        # Convert key to Node object if it's not already one
+                        try:
+                            if isinstance(key, bytes):
+                                # Ensure key is proper length for Node initialization
+                                if len(key) != 20:  # Standard Kademlia ID length
+                                    # Hash it to get consistent length
+                                    key = digest(key)
+                                key_node = Node(key)
+                            else:
+                                # If it's not bytes, try to encode it first
+                                if isinstance(key, str):
+                                    key_bytes = key.encode('utf-8')
+                                    if len(key_bytes) != 20:
+                                        key_bytes = digest(key_bytes)
+                                    key_node = Node(key_bytes)
+                                else:
+                                    key_node = key
+                                
+                            print(f"Created Node object for key: {type(key_node)}")
+                            
+                            if hasattr(router, 'find_neighbors'):
+                                neighbors = router.find_neighbors(key_node, exclude=source)
+                            elif hasattr(router, 'findNeighbors'):  # older version
+                                neighbors = router.findNeighbors(key_node, exclude=source)
+                            else:
+                                print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                                neighbors = []
+                        except Exception as e:
+                            print(f"Error creating Node for key or finding neighbors: {e}")
                             neighbors = []
+                            
                         return {'nodes': neighbors}
                     return {'nodes': []}
                 setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
@@ -124,6 +175,17 @@ class KademliaNode:
             methods.append('buckets')
             
         print(f"Router API supports these methods: {methods}")
+        
+        # Check Node class requirements
+        try:
+            dummy_id = b'0' * 20  # Create a dummy ID to instantiate a Node
+            dummy_node = Node(dummy_id)
+            print(f"Node class has attributes: {dir(dummy_node)}")
+            if hasattr(dummy_node, 'long_id'):
+                print("Node class has 'long_id' attribute required by modern Kademlia")
+        except Exception as e:
+            print(f"Error checking Node class attributes: {e}")
+            
         return methods
 
     async def start(self):
@@ -592,12 +654,32 @@ class KademliaNode:
                     if hasattr(self.server.protocol, 'router'):
                         router = self.server.protocol.router
                         # Handle different versions of the API
-                        if hasattr(router, 'find_neighbors'):
-                            neighbors = router.find_neighbors(key, exclude=source)
-                        elif hasattr(router, 'findNeighbors'):
-                            neighbors = router.findNeighbors(key, exclude=source)
-                        else:
-                            print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                        try:
+                            if isinstance(key, bytes):
+                                # Ensure key is proper length for Node initialization
+                                if len(key) != 20:  # Standard Kademlia ID length
+                                    # Hash it to get consistent length
+                                    key = digest(key)
+                                key_node = Node(key)
+                            else:
+                                # If it's not bytes, try to encode it first
+                                if isinstance(key, str):
+                                    key_bytes = key.encode('utf-8')
+                                    if len(key_bytes) != 20:
+                                        key_bytes = digest(key_bytes)
+                                    key_node = Node(key_bytes)
+                                else:
+                                    key_node = key
+                            
+                            if hasattr(router, 'find_neighbors'):
+                                neighbors = router.find_neighbors(key_node, exclude=source)
+                            elif hasattr(router, 'findNeighbors'):
+                                neighbors = router.findNeighbors(key_node, exclude=source)
+                            else:
+                                print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                                neighbors = []
+                        except Exception as e:
+                            print(f"Error in rpc_find_value: {e}")
                             neighbors = []
                         return {'nodes': neighbors}
                     return {'nodes': []}
@@ -612,11 +694,15 @@ class KademliaNode:
                 # Add support for making calls
                 async def call_find_value(node_tuple, key_bytes):
                     address = (node_tuple[0], node_tuple[1])
+                    # Ensure key_bytes is properly encoded
+                    if isinstance(key_bytes, str):
+                        key_bytes = key_bytes.encode('utf-8')
                     message = {'y': 'q', 'u': 'find_value', 'a': {'id': self.node_id, 'key': key_bytes}}
                     try:
                         response = await self.server.protocol.sendRPC(address, message)
                         return response.get('nodes', [])
-                    except Exception:
+                    except Exception as e:
+                        print(f"Error in call_find_value: {e}")
                         return []
                         
                 # Add the missing method to make calls
@@ -624,7 +710,12 @@ class KademliaNode:
                 
             # Try the direct protocol call which is less likely to have version issues
             if hasattr(self.server.protocol, 'callFindValue'):
-                result = await self.server.protocol.callFindValue(node, key.encode())
+                # Ensure key is properly encoded
+                if isinstance(key, str):
+                    key_encoded = key.encode('utf-8')
+                else:
+                    key_encoded = key
+                result = await self.server.protocol.callFindValue(node, key_encoded)
                 return result is not None and len(result) > 0
             # Fall back to the higher-level API
             elif hasattr(self.server, 'get'):
