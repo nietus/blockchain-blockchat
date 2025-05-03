@@ -685,12 +685,21 @@ async def consensus():
 
 async def fetch_chain_from_peer(node_address):
      logger.info(f"Fetching chain from {node_address}...")
+     
+     # For Railway deployment with node paths, ensure URL is properly formed
+     if '/node' in node_address:
+         chain_url = f"{node_address}/chain" if not node_address.endswith('/') else f"{node_address}chain"
+     else:
+         chain_url = f"{node_address}/chain"
+         
+     logger.info(f"Using chain URL: {chain_url}")
+     
      try:
           loop = asyncio.get_running_loop()
           # First try with a HEAD request to check if the node is responding at all
           try:
               head_response = await loop.run_in_executor(None, lambda: requests.head(
-                  f'{node_address}/chain', 
+                  chain_url, 
                   timeout=3
               ))
               head_response.raise_for_status()
@@ -700,7 +709,7 @@ async def fetch_chain_from_peer(node_address):
           
           # If HEAD request worked, proceed with full GET
           response = await loop.run_in_executor(None, lambda: requests.get(
-              f'{node_address}/chain', 
+              chain_url, 
               timeout=10
           ))
           response.raise_for_status() 
@@ -762,31 +771,46 @@ def announce_new_block(block_dict):
          # If no peers via Kademlia, try some heuristic approaches
          # Based on common network configurations
          try:
-             hostname = socket.gethostname()
-             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-             s.connect(('8.8.8.8', 80))
-             ip = s.getsockname()[0]
-             s.close()
-             
-             # Extract port from our HTTP address
-             our_port = int(this_node_http_address.split(':')[-1])
-             
-             # Try nodes on adjacent ports
-             for port_offset in range(1, 5):
-                 # Try both higher and lower port numbers
-                 for direction in [1, -1]:
-                     if direction == -1 and our_port + direction * port_offset <= 0:
-                         continue  # Skip invalid port
-                     
-                     test_port = our_port + direction * port_offset
-                     test_addr = f"http://{ip}:{test_port}"
-                     
-                     # Don't add our own address
-                     if test_addr == this_node_http_address:
-                         continue
+             # Special handling for Railway deployment
+             if 'railway.app' in this_node_http_address:
+                 base_url = this_node_http_address
+                 # Strip any existing node prefix
+                 if '/node' in base_url:
+                     base_url = base_url.split('/node')[0]
+                 # Add paths for potential sibling nodes
+                 for node_id in range(5):  # Try node0 through node4
+                     node_url = f"{base_url}/node{node_id}"
+                     # Don't add if it's our own address
+                     if node_url != this_node_http_address:
+                         logger.info(f"Adding Railway node by convention: {node_url}")
+                         active_peers.add(node_url)
+             else:
+                 # Local network approach
+                 hostname = socket.gethostname()
+                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                 s.connect(('8.8.8.8', 80))
+                 ip = s.getsockname()[0]
+                 s.close()
+                 
+                 # Extract port from our HTTP address
+                 our_port = int(this_node_http_address.split(':')[-1])
+                 
+                 # Try nodes on adjacent ports
+                 for port_offset in range(1, 5):
+                     # Try both higher and lower port numbers
+                     for direction in [1, -1]:
+                         if direction == -1 and our_port + direction * port_offset <= 0:
+                             continue  # Skip invalid port
                          
-                     logger.info(f"Adding heuristic peer for announcement: {test_addr}")
-                     active_peers.add(test_addr)
+                         test_port = our_port + direction * port_offset
+                         test_addr = f"http://{ip}:{test_port}"
+                         
+                         # Don't add our own address
+                         if test_addr == this_node_http_address:
+                             continue
+                             
+                         logger.info(f"Adding heuristic peer for announcement: {test_addr}")
+                         active_peers.add(test_addr)
          except Exception as e:
              logger.error(f"Error finding heuristic peers: {e}")
          
@@ -820,7 +844,15 @@ def announce_new_block(block_dict):
     threading.Thread(target=delayed_consensus_check, daemon=True).start()
 
 def send_announcement(node_address, data, headers):
-     url = f"{node_address}/add_block"
+     # For Railway deployment with node paths, we need to make sure the URL includes /add_block properly
+     if '/node' in node_address:
+         # If URL already has a node path (e.g. railway.app/node1)
+         url = f"{node_address}/add_block" if not node_address.endswith('/') else f"{node_address}add_block"
+     else:
+         # Standard URL format
+         url = f"{node_address}/add_block"
+     
+     logger.info(f"Sending announcement to URL: {url}")
      
      # Try up to 3 times with increasing timeouts
      for attempt in range(3):
@@ -921,10 +953,18 @@ async def verify_chain_consistency():
 async def get_peer_chain_info(peer_address):
     """Get the last block hash and chain length from a peer"""
     try:
+        # For Railway deployment with node paths, ensure URL is properly formed
+        if '/node' in peer_address:
+            chain_url = f"{peer_address}/chain" if not peer_address.endswith('/') else f"{peer_address}chain"
+        else:
+            chain_url = f"{peer_address}/chain"
+            
+        logger.info(f"Getting chain info from {chain_url}")
+        
         loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(
             None, 
-            lambda: requests.get(f'{peer_address}/chain', timeout=3)
+            lambda: requests.get(chain_url, timeout=3)
         )
         
         if response.status_code != 200:
@@ -938,7 +978,8 @@ async def get_peer_chain_info(peer_address):
             
         last_block = chain[-1]
         return last_block.get('hash'), len(chain)
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error getting chain info from {peer_address}: {e}")
         return None
 
 if __name__ == '__main__':

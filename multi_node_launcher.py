@@ -24,6 +24,9 @@ def run_node(node_id, http_port, kademlia_port, bootstrap_node=None):
         env['HTTP_NODE_ADDRESS'] = f"{railway_url}/node{node_id}"
         # We'll still use different Kademlia ports internally
         env['KADEMLIA_PORT'] = str(kademlia_port)
+        
+        # Debug info for Railway deployment
+        print(f"Railway deployment: Node {node_id} HTTP address set to {env['HTTP_NODE_ADDRESS']}")
     else:
         # For local development, use different ports
         env['FLASK_RUN_PORT'] = str(http_port)
@@ -69,7 +72,19 @@ if __name__ == "__main__":
     # Bootstrap connection string for other nodes
     # In Railway or local, we use the local IP for Kademlia
     host = socket.gethostname() if in_railway else '127.0.0.1'
+    
+    # Get more reliable IP for Docker/container environments
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        host = ip
+    except Exception as e:
+        print(f"Error getting IP address: {e}, falling back to hostname")
+    
     bootstrap_connection = f"{host}:{first_kademlia_port}"
+    print(f"Bootstrap connection string: {bootstrap_connection}")
     
     # Start additional nodes
     for i in range(1, num_nodes):

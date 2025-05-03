@@ -146,11 +146,40 @@ class KademliaNode:
                         # Check timestamp for freshness
                         if current_time - node_data.get('timestamp', 0) < timeout_seconds:
                             http_address = node_data.get('http_address')
-                            if http_address and node_data.get('node_id') != self.node_id.hex():
-                                print(f"Adding peer with HTTP address: {http_address}")
-                                peers.add(http_address)
+                            if http_address:
+                                if node_data.get('node_id') == self.node_id.hex():
+                                    print(f"Skipping self node {node_id}")
+                                    continue
+                                    
+                                # Special handling for Railway deployment with shared URL 
+                                # but different node prefixes
+                                if 'railway.app' in http_address:
+                                    # If there's already a node prefix, use it
+                                    if '/node' in http_address and not http_address.endswith('/'):
+                                        print(f"Adding Railway peer with prefixed address: {http_address}")
+                                        peers.add(http_address)
+                                    else:
+                                        # Try to extract node ID from Kademlia data
+                                        if 'kad_port' in node_data:
+                                            # Calculate node number from port offset
+                                            base_port = 5678
+                                            port_offset = node_data['kad_port'] - base_port
+                                            if port_offset >= 0:
+                                                # Assuming node0 is on base port, node1 on base+1, etc.
+                                                node_url = f"{http_address}/node{port_offset}"
+                                                print(f"Adding derived Railway peer address: {node_url}")
+                                                peers.add(node_url)
+                                            else:
+                                                print(f"Adding standard peer: {http_address}")
+                                                peers.add(http_address)
+                                        else:
+                                            print(f"Adding standard peer: {http_address}")
+                                            peers.add(http_address)
+                                else:
+                                    print(f"Adding peer with HTTP address: {http_address}")
+                                    peers.add(http_address)
                             else:
-                                print(f"Skipping node {node_id}: missing HTTP address or is self")
+                                print(f"Skipping node {node_id}: missing HTTP address")
                         else:
                             timestamp = node_data.get('timestamp', 0)
                             age = current_time - timestamp
@@ -160,6 +189,20 @@ class KademliaNode:
                         print(f"Could not decode JSON for node {node_id}: {result}")
                     except Exception as e:
                         print(f"Error processing data for node {node_id}: {e}")
+
+            # For Railway deployment, try direct node-prefix approach
+            if 'railway.app' in self.http_address:
+                base_url = self.http_address
+                # Strip any existing node prefix
+                if '/node' in base_url:
+                    base_url = base_url.split('/node')[0]
+                # Add paths for potential sibling nodes
+                for node_id in range(5):  # Try node0 through node4
+                    node_url = f"{base_url}/node{node_id}"
+                    # Don't add if it's our own address or already in the list
+                    if node_url != self.http_address and node_url not in peers:
+                        print(f"Adding potential Railway node by convention: {node_url}")
+                        peers.add(node_url)
 
             # Add direct querying for nodes we know might be in the network
             # This can help if the routing table doesn't have complete info
@@ -175,20 +218,41 @@ class KademliaNode:
                     print(f"Directly probing potential node at {ip}:{test_port}")
                     node = (ip, test_port)
                     
-                    # Try to ping this node directly
-                    ping_future = self.server.protocol.ping(node)
-                    await asyncio.wait_for(ping_future, timeout=2)
-                    print(f"Found active node at {ip}:{test_port}")
-                    
-                    # Construct standard HTTP address format
-                    http_port = 8000 + port_offset  # Convention: HTTP port = 8000 + offset
-                    http_address = f"http://{ip}:{http_port}"
-                    if http_address != self.http_address:  # Don't add self
-                        print(f"Adding discovered peer via direct probe: {http_address}")
-                        peers.add(http_address)
+                    # Use proper ping approach with a node ID
+                    rpc_id = self.node_id.hex()[:20]  # Use part of our ID as the RPC ID
+                    try:
+                        # Try ping in a safer way
+                        ping_future = self.server.protocol.call_ping(node, self.node_id, rpc_id)
+                        response = await asyncio.wait_for(ping_future, timeout=2)
+                        if response[0]:  # Success
+                            print(f"Found active node at {ip}:{test_port}")
+                            
+                            # Construct standard HTTP address format
+                            http_port = 8000 + port_offset  # Convention: HTTP port = 8000 + offset
+                            http_address = f"http://{ip}:{http_port}"
+                            if http_address != self.http_address:  # Don't add self
+                                print(f"Adding discovered peer via direct probe: {http_address}")
+                                peers.add(http_address)
+                    except AttributeError:
+                        # Fallback if call_ping is not available
+                        try:
+                            # Different ping approach
+                            ping_future = self.server.ping(node)
+                            await asyncio.wait_for(ping_future, timeout=2)
+                            print(f"Found active node with alternative ping at {ip}:{test_port}")
+                            
+                            # Construct standard HTTP address format
+                            http_port = 8000 + port_offset
+                            http_address = f"http://{ip}:{http_port}"
+                            if http_address != self.http_address:
+                                print(f"Adding discovered peer via alternative ping: {http_address}")
+                                peers.add(http_address)
+                        except Exception:
+                            pass
                 except Exception as e:
-                    # Expected to fail for nodes that don't exist
-                    pass
+                    # Expected to fail for nodes that don't exist, only print for unexpected errors
+                    if not isinstance(e, (asyncio.TimeoutError, ConnectionRefusedError)):
+                        print(f"Unexpected error probing {ip}:{test_port}: {e}")
 
         except Exception as e:
             print(f"Error during Kademlia peer discovery: {e}")
