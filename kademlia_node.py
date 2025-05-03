@@ -68,25 +68,41 @@ class KademliaNode:
                             key_node = self._convert_to_node(key)
                             print(f"Created Node object for key: {type(key_node)}")
                             
+                            neighbors_nodes = []
                             # Different router versions handle exclusion differently
                             if hasattr(router, 'find_neighbors'):
                                 # Modern API expects a Node object or ID for exclusion
                                 try:
                                     # Try without exclusion if there are issues
-                                    neighbors = router.find_neighbors(key_node)
+                                    neighbors_nodes = router.find_neighbors(key_node)
                                 except Exception as e:
                                     print(f"Basic find_neighbors failed, trying alternate approach: {e}")
-                                    neighbors = []
                             elif hasattr(router, 'findNeighbors'):  # older version
                                 try:
                                     # Try without exclusion if there are issues
-                                    neighbors = router.findNeighbors(key_node)
+                                    neighbors_nodes = router.findNeighbors(key_node)
                                 except Exception as e:
                                     print(f"Basic findNeighbors failed, trying alternate approach: {e}")
-                                    neighbors = []
                             else:
                                 print("Warning: Router has neither find_neighbors nor findNeighbors method")
-                                neighbors = []
+                                
+                            # Convert Node objects to serializable tuples (id, ip, port)
+                            serializable_neighbors = []
+                            for node_obj in neighbors_nodes:
+                                try:
+                                    # Ensure attributes exist before accessing
+                                    node_id = getattr(node_obj, 'id', None)
+                                    node_ip = getattr(node_obj, 'ip', None)
+                                    node_port = getattr(node_obj, 'port', None)
+                                    if node_id is not None and node_ip is not None and node_port is not None:
+                                        serializable_neighbors.append((node_id, node_ip, node_port))
+                                    else:
+                                        print(f"Warning: Could not serialize neighbor node, missing attributes: {node_obj}")
+                                except Exception as e:
+                                    print(f"Error serializing neighbor node {node_obj}: {e}")
+                                    
+                            neighbors = serializable_neighbors
+                                
                         except Exception as e:
                             print(f"Error creating Node for key or finding neighbors: {e}")
                             neighbors = []
@@ -99,51 +115,64 @@ class KademliaNode:
                 setattr(self.server.protocol, 'rpc_callFindValue', rpc_callFindValue)
                 print("Added rpc_callFindValue method to protocol")
                 
-            # Add rpc_find_value method if it doesn't exist
+            # Add rpc_find_value method if it doesn't exist (often alias for callFindValue)
             if not hasattr(self.server.protocol, 'rpc_find_value'):
-                async def rpc_find_value(sender, key):
-                    try:
-                        # Handle different router API versions
-                        if not hasattr(self.server.protocol, 'router'):
-                            return {'nodes': []}
+                # Reuse the same implementation as rpc_callFindValue
+                if hasattr(self.server.protocol, 'rpc_callFindValue'):
+                     setattr(self.server.protocol, 'rpc_find_value', self.server.protocol.rpc_callFindValue)
+                     print("Aliased rpc_find_value to rpc_callFindValue")
+                else:
+                    # If rpc_callFindValue somehow failed to patch, implement separately
+                    async def rpc_find_value(sender, key):
+                         try:
+                            # Handle different router API versions
+                            if not hasattr(self.server.protocol, 'router'):
+                                return {'nodes': []}
+                                
+                            router = self.server.protocol.router
                             
-                        router = self.server.protocol.router
-                        
-                        # Convert the key to a proper Node object using our helper
-                        try:
-                            key_node = self._convert_to_node(key)
-                            print(f"Created Node object for key: {type(key_node)}")
-                            
-                            # Different router versions handle exclusion differently
-                            if hasattr(router, 'find_neighbors'):
-                                # Modern API expects a Node object or ID for exclusion
-                                try:
-                                    # Try without exclusion if there are issues
-                                    neighbors = router.find_neighbors(key_node)
-                                except Exception as e:
-                                    print(f"Basic find_neighbors failed, trying alternate approach: {e}")
-                                    neighbors = []
-                            elif hasattr(router, 'findNeighbors'):  # older version
-                                try:
-                                    # Try without exclusion if there are issues
-                                    neighbors = router.findNeighbors(key_node)
-                                except Exception as e:
-                                    print(f"Basic findNeighbors failed, trying alternate approach: {e}")
-                                    neighbors = []
-                            else:
-                                print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                            # Convert the key to a proper Node object using our helper
+                            try:
+                                key_node = self._convert_to_node(key)
+                                neighbors_nodes = []
+                                if hasattr(router, 'find_neighbors'):
+                                    try:
+                                        neighbors_nodes = router.find_neighbors(key_node)
+                                    except Exception as e:
+                                        print(f"Basic find_neighbors failed in rpc_find_value: {e}")
+                                elif hasattr(router, 'findNeighbors'):
+                                    try:
+                                        neighbors_nodes = router.findNeighbors(key_node)
+                                    except Exception as e:
+                                        print(f"Basic findNeighbors failed in rpc_find_value: {e}")
+                                else:
+                                    print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                                    
+                                # Convert Node objects to serializable tuples (id, ip, port)
+                                serializable_neighbors = []
+                                for node_obj in neighbors_nodes:
+                                     try:
+                                        node_id = getattr(node_obj, 'id', None)
+                                        node_ip = getattr(node_obj, 'ip', None)
+                                        node_port = getattr(node_obj, 'port', None)
+                                        if node_id is not None and node_ip is not None and node_port is not None:
+                                            serializable_neighbors.append((node_id, node_ip, node_port))
+                                        else:
+                                            print(f"Warning: Could not serialize neighbor node, missing attributes: {node_obj}")
+                                     except Exception as e:
+                                        print(f"Error serializing neighbor node {node_obj}: {e}")
+                                neighbors = serializable_neighbors
+                                    
+                            except Exception as e:
+                                print(f"Error creating Node for key or finding neighbors in rpc_find_value: {e}")
                                 neighbors = []
-                        except Exception as e:
-                            print(f"Error creating Node for key or finding neighbors: {e}")
-                            neighbors = []
-                            
-                        return {'nodes': neighbors}
-                    except Exception as e:
-                        print(f"Error in rpc_find_value: {e}")
-                        return {'nodes': []}
-                        
-                setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
-                print("Added rpc_find_value method to protocol")
+                                
+                            return {'nodes': neighbors}
+                         except Exception as e:
+                            print(f"Error in rpc_find_value implementation: {e}")
+                            return {'nodes': []}
+                    setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
+                    print("Added separate rpc_find_value method to protocol")
                 
             print("Successfully patched all required RPC methods")
         except Exception as e:
