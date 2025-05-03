@@ -454,15 +454,48 @@ class KademliaNode:
     async def safe_find_value(self, node, key):
         """Safer find_value implementation that works with different Kademlia versions"""
         try:
+            # First, try to patch the protocol if needed to support callFindValue
+            if hasattr(self.server, 'protocol') and not hasattr(self.server.protocol, 'callFindValue'):
+                # Add support for callFindValue if it doesn't exist
+                async def rpc_find_value(sender, key):
+                    source = (sender[0], sender[1])
+                    if hasattr(self.server.protocol, 'router'):
+                        neighbors = self.server.protocol.router.findNeighbors(key, exclude=source)
+                        return {'nodes': neighbors}
+                    return {'nodes': []}
+                    
+                # Add the missing method to handle RPC calls
+                setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
+                
+                # Add support for making calls
+                async def call_find_value(node_tuple, key_bytes):
+                    address = (node_tuple[0], node_tuple[1])
+                    message = {'y': 'q', 'u': 'find_value', 'a': {'id': self.node_id, 'key': key_bytes}}
+                    try:
+                        response = await self.server.protocol.sendRPC(address, message)
+                        return response.get('nodes', [])
+                    except Exception:
+                        return []
+                        
+                # Add the missing method to make calls
+                setattr(self.server.protocol, 'callFindValue', call_find_value)
+                
             # Try the direct protocol call which is less likely to have version issues
             if hasattr(self.server.protocol, 'callFindValue'):
                 result = await self.server.protocol.callFindValue(node, key.encode())
-                return result
+                return result is not None and len(result) > 0
             # Fall back to the higher-level API
             elif hasattr(self.server, 'get'):
                 # This doesn't contact the specific node but tries the network
                 result = await self.server.get(key)
                 return result is not None  # Return whether we found anything
+            # Last resort: try a direct ping
+            elif hasattr(self.server.protocol, 'ping'):
+                try:
+                    ping_result = await self.server.protocol.ping(node)
+                    return ping_result
+                except Exception:
+                    pass
             return False
         except Exception as e:
             print(f"Safe find_value failed: {e}")
