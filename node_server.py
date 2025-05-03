@@ -636,11 +636,18 @@ async def consensus():
     max_len = current_len
 
     active_peers = await get_active_peers_async()
-    logger.info(f"Found {len(active_peers)} active peers via Kademlia for consensus.")
+    logger.info(f"Found {len(active_peers)} active peers via Kademlia for consensus: {active_peers}")
     
     if not active_peers:
         logger.warning("No peers available for consensus. Chain remains unchanged.")
         return False
+
+    # Special case for Railway deployment - if we're running in Railway, 
+    # check if we're the bootstrap node (node0)
+    is_bootstrap_node = False
+    if 'railway.app' in this_node_http_address and '/node0' in this_node_http_address:
+        logger.info("This is the bootstrap node (node0) in Railway deployment")
+        is_bootstrap_node = True
 
     tasks = []
     for node in active_peers:
@@ -667,6 +674,16 @@ async def consensus():
               valid_chains_count += 1
               length, chain = result
               logger.info(f"Received valid chain from {peer_node} with length {length}")
+              
+              # Special handling for bootstrap node - prioritize its chain
+              if is_bootstrap_node and '/node0' in peer_node:
+                   logger.info(f"Found bootstrap node chain with length {length} - giving priority")
+                   if blockchain.check_chain_validity(chain):
+                        longest_chain = chain
+                        max_len = length
+                        break  # We've found the authoritative source - stop looking
+                        
+              # Normal consensus process
               if length > max_len and blockchain.check_chain_validity(chain):
                    logger.info(f"Longer valid chain found at {peer_node} (length {length} > {max_len})")
                    max_len = length
@@ -685,6 +702,15 @@ async def consensus():
 
 async def fetch_chain_from_peer(node_address):
      logger.info(f"Fetching chain from {node_address}...")
+     
+     # Ensure URL has a scheme
+     if not node_address.startswith(('http://', 'https://')):
+         # For Railway, use https
+         if 'railway.app' in node_address:
+             node_address = f"https://{node_address}"
+         else:
+             node_address = f"http://{node_address}"
+         logger.info(f"Added scheme to URL: {node_address}")
      
      # For Railway deployment with node paths, ensure URL is properly formed
      if '/node' in node_address:
@@ -774,6 +800,12 @@ def announce_new_block(block_dict):
              # Special handling for Railway deployment
              if 'railway.app' in this_node_http_address:
                  base_url = this_node_http_address
+                 
+                 # Add scheme if missing
+                 if not base_url.startswith(('http://', 'https://')):
+                     base_url = f"https://{base_url}"
+                     logger.info(f"Added https scheme to Railway URL: {base_url}")
+                     
                  # Strip any existing node prefix
                  if '/node' in base_url:
                      base_url = base_url.split('/node')[0]
@@ -844,6 +876,15 @@ def announce_new_block(block_dict):
     threading.Thread(target=delayed_consensus_check, daemon=True).start()
 
 def send_announcement(node_address, data, headers):
+     # Ensure URL has a scheme
+     if not node_address.startswith(('http://', 'https://')):
+         # For Railway, use https
+         if 'railway.app' in node_address:
+             node_address = f"https://{node_address}"
+         else:
+             node_address = f"http://{node_address}"
+         logger.info(f"Added scheme to announcement URL: {node_address}")
+     
      # For Railway deployment with node paths, we need to make sure the URL includes /add_block properly
      if '/node' in node_address:
          # If URL already has a node path (e.g. railway.app/node1)
@@ -907,6 +948,8 @@ async def verify_chain_consistency():
         logger.info("No peers available to verify chain consistency.")
         return True  # Can't verify, assume we're good
     
+    logger.info(f"Verifying chain consistency with {len(active_peers)} peers: {active_peers}")
+    
     # Collect the last hash from each peer
     peer_hashes = {}
     peer_lengths = {}
@@ -920,23 +963,35 @@ async def verify_chain_consistency():
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
     valid_results = 0
-    for result in results:
+    errors = 0
+    for i, result in enumerate(results):
+        peer_node = active_peers[i] if i < len(active_peers) else "unknown"
         if isinstance(result, Exception):
+            logger.warning(f"Error getting chain info from {peer_node}: {result}")
+            errors += 1
             continue
-        if result:
-            peer_hash, peer_length = result
-            peer_hashes[peer_hash] = peer_hashes.get(peer_hash, 0) + 1
-            peer_lengths[peer_length] = peer_lengths.get(peer_length, 0) + 1
-            valid_results += 1
+        if result is None:
+            logger.warning(f"No valid chain info from {peer_node}")
+            continue
+        
+        peer_hash, peer_length = result
+        logger.info(f"Peer {peer_node} has chain length {peer_length} with last hash {peer_hash[:8]}...")
+        peer_hashes[peer_hash] = peer_hashes.get(peer_hash, 0) + 1
+        peer_lengths[peer_length] = peer_lengths.get(peer_length, 0) + 1
+        valid_results += 1
     
     if valid_results == 0:
-        logger.warning("Could not get chain info from any peers.")
+        logger.warning(f"Could not get chain info from any peers ({errors} errors).")
         return True  # Can't verify, assume we're good
     
     # Check if our hash matches the majority hash
     if len(peer_hashes) == 0:
+        logger.info("No peer hash data available for comparison.")
         return True  # No peer data, assume we're ok
         
+    logger.info(f"Peer hash counts: {peer_hashes}")
+    logger.info(f"Peer length counts: {peer_lengths}")
+    
     majority_hash = max(peer_hashes.items(), key=lambda x: x[1])[0]
     majority_length = max(peer_lengths.items(), key=lambda x: x[1])[0]
     
@@ -946,13 +1001,22 @@ async def verify_chain_consistency():
     if not is_consistent:
         logger.warning(f"Our chain appears to be out of sync. Our length: {our_chain_length}, majority length: {majority_length}. Our hash: {our_last_hash[:8]}, majority hash: {majority_hash[:8]}")
     else:
-        logger.info("Chain consistency verified: Our chain matches or exceeds the network majority.")
+        logger.info(f"Chain consistency verified: Our chain (length {our_chain_length}, hash {our_last_hash[:8]}...) matches or exceeds the network majority.")
     
     return is_consistent
 
 async def get_peer_chain_info(peer_address):
     """Get the last block hash and chain length from a peer"""
     try:
+        # Ensure URL has a scheme
+        if not peer_address.startswith(('http://', 'https://')):
+            # For Railway, use https
+            if 'railway.app' in peer_address:
+                peer_address = f"https://{peer_address}"
+            else:
+                peer_address = f"http://{peer_address}"
+            logger.info(f"Added scheme to peer URL: {peer_address}")
+        
         # For Railway deployment with node paths, ensure URL is properly formed
         if '/node' in peer_address:
             chain_url = f"{peer_address}/chain" if not peer_address.endswith('/') else f"{peer_address}chain"
@@ -999,6 +1063,35 @@ if __name__ == '__main__':
     
     consensus_thread = threading.Thread(target=schedule_periodic_consensus, daemon=True)
     consensus_thread.start()
+    
+    # Set up an immediate consensus check after startup
+    # This is important to ensure quick synchronization
+    def immediate_consensus():
+        try:
+            # Wait a short time for network to establish
+            time.sleep(15)
+            logger.info("Running immediate startup consensus check")
+            if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+                asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
+        except Exception as e:
+            logger.error(f"Error in immediate consensus: {e}")
+            
+    threading.Thread(target=immediate_consensus, daemon=True).start()
+    
+    # Add additional periodic check for peer update in Railway environment
+    if 'railway.app' in this_node_http_address:
+        def railway_refresh_peers():
+            while True:
+                try:
+                    time.sleep(120)  # Every 2 minutes
+                    logger.info("Railway environment: Refreshing peer registration")
+                    if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+                        asyncio.run_coroutine_threadsafe(kademlia_node.register_self(), kademlia_node.loop)
+                except Exception as e:
+                    logger.error(f"Error in Railway peer refresh: {e}")
+                    
+        threading.Thread(target=railway_refresh_peers, daemon=True).start()
+        logger.info("Started Railway-specific peer refresh thread")
     
     # Railway provides PORT environment variable
     port = int(os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 8000)))

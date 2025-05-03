@@ -154,6 +154,11 @@ class KademliaNode:
                                 # Special handling for Railway deployment with shared URL 
                                 # but different node prefixes
                                 if 'railway.app' in http_address:
+                                    # Add scheme if missing
+                                    if not http_address.startswith(('http://', 'https://')):
+                                        http_address = f"https://{http_address}"
+                                        print(f"Added https scheme to Railway URL: {http_address}")
+                                    
                                     # If there's already a node prefix, use it
                                     if '/node' in http_address and not http_address.endswith('/'):
                                         print(f"Adding Railway peer with prefixed address: {http_address}")
@@ -193,6 +198,12 @@ class KademliaNode:
             # For Railway deployment, try direct node-prefix approach
             if 'railway.app' in self.http_address:
                 base_url = self.http_address
+                
+                # Add scheme if missing
+                if not base_url.startswith(('http://', 'https://')):
+                    base_url = f"https://{base_url}"
+                    print(f"Added https scheme to base URL: {base_url}")
+                
                 # Strip any existing node prefix
                 if '/node' in base_url:
                     base_url = base_url.split('/node')[0]
@@ -218,41 +229,43 @@ class KademliaNode:
                     print(f"Directly probing potential node at {ip}:{test_port}")
                     node = (ip, test_port)
                     
-                    # Use proper ping approach with a node ID
-                    rpc_id = self.node_id.hex()[:20]  # Use part of our ID as the RPC ID
+                    # Try different ping approaches based on kademlia library version
                     try:
-                        # Try ping in a safer way
-                        ping_future = self.server.protocol.call_ping(node, self.node_id, rpc_id)
-                        response = await asyncio.wait_for(ping_future, timeout=2)
-                        if response[0]:  # Success
+                        # Simplest approach - just use the ping method
+                        ping_future = self.server.ping(node)
+                        result = await asyncio.wait_for(ping_future, timeout=2)
+                        if result:
                             print(f"Found active node at {ip}:{test_port}")
                             
                             # Construct standard HTTP address format
                             http_port = 8000 + port_offset  # Convention: HTTP port = 8000 + offset
                             http_address = f"http://{ip}:{http_port}"
                             if http_address != self.http_address:  # Don't add self
-                                print(f"Adding discovered peer via direct probe: {http_address}")
+                                print(f"Adding discovered peer via ping: {http_address}")
                                 peers.add(http_address)
-                    except AttributeError:
-                        # Fallback if call_ping is not available
+                    except (AttributeError, TypeError) as e:
+                        print(f"First ping method failed: {e}, trying protocol ping")
+                        # Try older protocol ping
                         try:
-                            # Different ping approach
-                            ping_future = self.server.ping(node)
+                            # Try protocol level ping
+                            ping_future = self.server.protocol.ping(node)
                             await asyncio.wait_for(ping_future, timeout=2)
-                            print(f"Found active node with alternative ping at {ip}:{test_port}")
+                            print(f"Found active node with protocol ping at {ip}:{test_port}")
                             
                             # Construct standard HTTP address format
                             http_port = 8000 + port_offset
                             http_address = f"http://{ip}:{http_port}"
                             if http_address != self.http_address:
-                                print(f"Adding discovered peer via alternative ping: {http_address}")
+                                print(f"Adding discovered peer via protocol ping: {http_address}")
                                 peers.add(http_address)
-                        except Exception:
+                        except Exception as e2:
+                            print(f"Protocol ping also failed: {e2}")
                             pass
                 except Exception as e:
                     # Expected to fail for nodes that don't exist, only print for unexpected errors
                     if not isinstance(e, (asyncio.TimeoutError, ConnectionRefusedError)):
                         print(f"Unexpected error probing {ip}:{test_port}: {e}")
+                        # Don't re-raise, just continue with next port
 
         except Exception as e:
             print(f"Error during Kademlia peer discovery: {e}")
