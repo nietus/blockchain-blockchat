@@ -50,7 +50,15 @@ class KademliaNode:
                 async def rpc_callFindValue(sender, key):
                     source = (sender[0], sender[1])
                     if hasattr(self.server.protocol, 'router'):
-                        neighbors = self.server.protocol.router.findNeighbors(key, exclude=source)
+                        # Handle different versions of the API (with or without underscores)
+                        router = self.server.protocol.router
+                        if hasattr(router, 'find_neighbors'):
+                            neighbors = router.find_neighbors(key, exclude=source)
+                        elif hasattr(router, 'findNeighbors'):  # older version
+                            neighbors = router.findNeighbors(key, exclude=source)
+                        else:
+                            print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                            neighbors = []
                         return {'nodes': neighbors}
                     return {'nodes': []}
                 setattr(self.server.protocol, 'rpc_callFindValue', rpc_callFindValue)
@@ -61,7 +69,15 @@ class KademliaNode:
                 async def rpc_find_value(sender, key):
                     source = (sender[0], sender[1])
                     if hasattr(self.server.protocol, 'router'):
-                        neighbors = self.server.protocol.router.findNeighbors(key, exclude=source)
+                        # Handle different versions of the API (with or without underscores)
+                        router = self.server.protocol.router
+                        if hasattr(router, 'find_neighbors'):
+                            neighbors = router.find_neighbors(key, exclude=source)
+                        elif hasattr(router, 'findNeighbors'):  # older version
+                            neighbors = router.findNeighbors(key, exclude=source)
+                        else:
+                            print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                            neighbors = []
                         return {'nodes': neighbors}
                     return {'nodes': []}
                 setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
@@ -73,6 +89,43 @@ class KademliaNode:
             import traceback
             traceback.print_exc()
         
+    def _detect_router_api_version(self):
+        """Detect which version of the Kademlia router API is being used"""
+        if not hasattr(self.server, 'protocol') or self.server.protocol is None:
+            print("Cannot detect router API version - protocol not initialized")
+            return
+            
+        if not hasattr(self.server.protocol, 'router'):
+            print("Cannot detect router API version - router not initialized")
+            return
+            
+        router = self.server.protocol.router
+        print(f"Detecting router API version. Router type: {type(router).__name__}")
+        
+        # Check for various method names to determine the API version
+        methods = []
+        
+        # Modern API methods (with underscores)
+        if hasattr(router, 'find_neighbors'):
+            methods.append('find_neighbors')
+            
+        # Older API methods (camelCase)
+        if hasattr(router, 'findNeighbors'):
+            methods.append('findNeighbors')
+            
+        # Node retrieval methods
+        if hasattr(router, 'get_nodes'):
+            methods.append('get_nodes')
+        if hasattr(router, 'getNodes'):
+            methods.append('getNodes')
+            
+        # Check bucket structure
+        if hasattr(router, 'buckets'):
+            methods.append('buckets')
+            
+        print(f"Router API supports these methods: {methods}")
+        return methods
+
     async def start(self):
         """Start the Kademlia server and join the network"""
         if self.running:
@@ -103,6 +156,9 @@ class KademliaNode:
             
             # Now that the server has started and protocol is initialized, patch RPC methods
             if hasattr(self.server, 'protocol') and self.server.protocol is not None:
+                # Detect which API version we're using
+                self._detect_router_api_version()
+                # Patch RPC methods
                 self._patch_rpc_methods()
             else:
                 print(f"Warning: Server started but protocol is not initialized, cannot patch RPC methods")
@@ -170,6 +226,7 @@ class KademliaNode:
                             has_neighbors = any(len(bucket.nodes) > 0 for bucket in self.server.protocol.router.buckets)
                         else:
                             # If we can't determine neighbors, assume we need to bootstrap
+                            print("Could not determine if we have neighbors using known APIs")
                             has_neighbors = False
                     except Exception as e:
                         print(f"Error checking for neighbors: {e}")
@@ -177,8 +234,16 @@ class KademliaNode:
                         
                     if not has_neighbors:
                         print("Re-bootstrapping to find more peers before registering")
+                        bootstrap_tasks = []
                         for host, port in self.bootstrap_nodes:
-                            await self.server.bootstrap([(host, port)])
+                            try:
+                                task = self.server.bootstrap([(host, port)])
+                                bootstrap_tasks.append(task)
+                            except Exception as e:
+                                print(f"Error creating bootstrap task for {host}:{port}: {e}")
+                        if bootstrap_tasks:
+                            await asyncio.gather(*bootstrap_tasks)
+                            print(f"Bootstrapped with {len(bootstrap_tasks)} nodes")
                 except Exception as e:
                     print(f"Error during bootstrap: {e}")
             
@@ -525,7 +590,15 @@ class KademliaNode:
                 async def rpc_find_value(sender, key):
                     source = (sender[0], sender[1])
                     if hasattr(self.server.protocol, 'router'):
-                        neighbors = self.server.protocol.router.findNeighbors(key, exclude=source)
+                        router = self.server.protocol.router
+                        # Handle different versions of the API
+                        if hasattr(router, 'find_neighbors'):
+                            neighbors = router.find_neighbors(key, exclude=source)
+                        elif hasattr(router, 'findNeighbors'):
+                            neighbors = router.findNeighbors(key, exclude=source)
+                        else:
+                            print("Warning: Router has neither find_neighbors nor findNeighbors method")
+                            neighbors = []
                         return {'nodes': neighbors}
                     return {'nodes': []}
                     
