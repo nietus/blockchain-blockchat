@@ -9,6 +9,7 @@ import threading
 import asyncio
 import logging
 import socket
+import queue
 
 from flask import Flask, request, Blueprint
 import requests
@@ -175,6 +176,10 @@ blockchain = None
 kademlia_node = None
 kademlia_thread = None
 
+# Queue for signaling the mining thread
+mining_queue = queue.Queue()
+mining_active = threading.Event() # Event to signal if mining is in progress
+
 # Handle Railway deployment URL
 railway_url = 'blockchain-bc-production.up.railway.app'
 port = os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 8000))
@@ -190,6 +195,42 @@ hostname = socket.gethostname()
 logging.basicConfig(level=logging.INFO, 
                    format=f'%(asctime)s {hostname} [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
+
+def mine_worker():
+    """Background worker thread to handle mining requests."""
+    logger.info("Mining worker thread started.")
+    while True:
+        try:
+            # Wait for a signal to start mining
+            mining_queue.get() # Blocks until an item is available
+            if not blockchain or not blockchain.unconfirmed_transactions:
+                logger.info("Mining worker received signal, but no transactions to mine.")
+                mining_queue.task_done()
+                continue
+                
+            if mining_active.is_set():
+                logger.info("Mining is already in progress.")
+                mining_queue.task_done()
+                continue
+
+            logger.info("Mining worker starting proof-of-work...")
+            mining_active.set() # Signal that mining is active
+            try:
+                result = blockchain.mine()
+                if result is not False:
+                    logger.info(f"Mining worker successfully mined block #{result}")
+                else:
+                    logger.info("Mining worker: mining returned False (no tx or failed add)")
+            except Exception as e:
+                logger.error(f"Error during background mining: {e}", exc_info=True)
+            finally:
+                mining_active.clear() # Signal that mining is finished
+                mining_queue.task_done() # Mark the task as done
+
+        except Exception as e:
+            logger.error(f"Error in mining worker loop: {e}", exc_info=True)
+            # Avoid busy-looping on error
+            time.sleep(5)
 
 def setup_and_run_kademlia():
     global kademlia_node, kademlia_thread
@@ -448,11 +489,27 @@ def get_chain():
 def mine_unconfirmed_transactions():
     if not blockchain:
          return "Blockchain not initialized", 500
-    result = blockchain.mine()
-    if result is False:
-        return "No transactions to mine or failed to add block", 200
-    else:
-        return f"Block #{result} is mined.", 200
+         
+    # Check if mining is already in progress
+    if mining_active.is_set():
+        return "Mining is already in progress", 429 # 429 Too Many Requests
+        
+    # Check if there are transactions to mine
+    if not blockchain.unconfirmed_transactions:
+        return "No transactions to mine", 200
+        
+    # Signal the background worker thread to start mining
+    logger.info("Received /mine request, signaling background worker...")
+    try:
+        # Add item to queue to trigger worker. Put non-blocking to avoid waiting if queue is full (shouldn't happen)
+        mining_queue.put_nowait(True) 
+        return "Mining process scheduled", 202 # 202 Accepted
+    except queue.Full:
+        logger.warning("Mining queue is full, cannot schedule mining now.")
+        return "Mining worker busy, try again later", 503 # 503 Service Unavailable
+    except Exception as e:
+        logger.error(f"Error signaling mining worker: {e}")
+        return "Error scheduling mining", 500
 
 async def get_active_peers_async():
      if kademlia_node and kademlia_node.running:
@@ -1049,6 +1106,11 @@ async def get_peer_chain_info(peer_address):
 if __name__ == '__main__':
     load_chain() 
     setup_and_run_kademlia()
+    
+    # Start the mining worker thread
+    miner_thread = threading.Thread(target=mine_worker, daemon=True)
+    miner_thread.start()
+    logger.info("Started background mining worker thread.")
     
     # Schedule periodic consensus checks
     def schedule_periodic_consensus():
