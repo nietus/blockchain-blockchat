@@ -88,11 +88,53 @@ class KademliaNode:
 
         try:
             print(f"Attempting to register/update node info in DHT: {self.node_info}")
-            # Store this node's info using its own node_id as the key
+            
+            # First, ensure we're bootstrapped if possible
+            if self.bootstrap_nodes and hasattr(self.server, 'bootstrap'):
+                # Try re-bootstrapping to find more peers if we don't have many
+                if len(self.server.protocol.router.getNodes()) < 3:
+                    print("Re-bootstrapping to find more peers before registering")
+                    for host, port in self.bootstrap_nodes:
+                        await self.server.bootstrap([(host, port)])
+            
+            # Wait a moment for bootstrap to have an effect
+            await asyncio.sleep(0.5)
+            
+            # Store using both our node_id and a well-known key
+            common_key = "blockchain_nodes_registry"
+            
+            # First store using our node ID
             await self.server.set(self.node_id.hex(), json.dumps(self.node_info))
             print(f"Successfully registered node {self.node_id.hex()} in the DHT.")
+            
+            # If we're bootstrapped and have neighbors, also store under the common key
+            if len(self.server.protocol.router.getNodes()) > 0:
+                # Try to read the existing registry first
+                try:
+                    registry_value = await self.server.get(common_key)
+                    if registry_value:
+                        registry = json.loads(registry_value)
+                    else:
+                        registry = {}
+                except Exception:
+                    registry = {}
+                
+                if not isinstance(registry, dict):
+                    registry = {}
+                
+                # Add our node to the registry
+                registry[self.node_id.hex()] = self.node_info
+                
+                # Store the updated registry
+                await self.server.set(common_key, json.dumps(registry))
+                print(f"Added node to common registry: {self.node_id.hex()}")
+            else:
+                print("No neighbors in routing table to store common registry")
+                
         except Exception as e:
              print(f"Error registering node {self.node_id.hex()} in DHT: {e}")
+             import traceback
+             traceback.print_exc()
     
     async def get_active_blockchain_peers(self, timeout_seconds=300):
         """Get HTTP addresses of active blockchain peers discovered via Kademlia."""
@@ -107,6 +149,56 @@ class KademliaNode:
             # Include self initially
             potential_node_ids = {self.node_id.hex()} 
             
+            # First try to get the common registry which should have all nodes
+            common_key = "blockchain_nodes_registry"
+            try:
+                registry_value = await self.server.get(common_key)
+                if registry_value:
+                    try:
+                        registry = json.loads(registry_value)
+                        if isinstance(registry, dict):
+                            print(f"Found {len(registry)} nodes in common registry")
+                            for node_id, node_data in registry.items():
+                                if node_id != self.node_id.hex():  # Skip self
+                                    potential_node_ids.add(node_id)
+                                    try:
+                                        # Process node from registry directly
+                                        if isinstance(node_data, dict):
+                                            print(f"Processing node from registry: {node_id}")
+                                            http_address = node_data.get('http_address')
+                                            
+                                            # Validate and clean the HTTP address
+                                            if http_address:
+                                                # Add scheme if missing
+                                                if not http_address.startswith(('http://', 'https://')):
+                                                    if 'railway.app' in http_address:
+                                                        http_address = f"https://{http_address}"
+                                                    else:
+                                                        http_address = f"http://{http_address}"
+                                                    print(f"Added scheme to registry URL: {http_address}")
+                                                
+                                                # Remove any semicolons
+                                                http_address = http_address.replace(';', '')
+                                                
+                                                # For Railway apps, ensure node prefix is included
+                                                if 'railway.app' in http_address and '/node' not in http_address:
+                                                    # Try to get node ID from port offset
+                                                    if 'kad_port' in node_data:
+                                                        base_port = 5678
+                                                        port_offset = node_data['kad_port'] - base_port
+                                                        if port_offset >= 0:
+                                                            http_address = f"{http_address}/node{port_offset}"
+                                                            
+                                                # Add the peer if it's valid
+                                                print(f"Adding peer from registry: {http_address}")
+                                                peers.add(http_address)
+                                    except Exception as e:
+                                        print(f"Error processing registry node {node_id}: {e}")
+                    except json.JSONDecodeError:
+                        print(f"Could not decode registry JSON: {registry_value}")
+            except Exception as e:
+                print(f"Error fetching common registry: {e}")
+                
             # Access the routing table buckets directly
             if hasattr(self.server, 'protocol') and hasattr(self.server.protocol, 'router'):
                 # Iterate through all buckets in the routing table

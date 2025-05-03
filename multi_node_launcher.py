@@ -83,8 +83,17 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error getting IP address: {e}, falling back to hostname")
     
-    bootstrap_connection = f"{host}:{first_kademlia_port}"
+    # In Railway, try multiple bootstrap approaches
+    if in_railway:
+        # Provide multiple bootstrap options - hostname, IP, and node0 container name
+        bootstrap_connection = f"{host}:{first_kademlia_port},10.250.14.38:{first_kademlia_port},container_{railway_url.replace('.', '_').replace('-', '_')}_0:{first_kademlia_port}"
+    else:
+        bootstrap_connection = f"{host}:{first_kademlia_port}"
+        
     print(f"Bootstrap connection string: {bootstrap_connection}")
+    
+    # Give the first node more time to initialize
+    time.sleep(10)
     
     # Start additional nodes
     for i in range(1, num_nodes):

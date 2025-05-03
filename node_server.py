@@ -236,6 +236,17 @@ def setup_and_run_kademlia():
                     continue
                 logger.info(f"Adding default bootstrap node: {test_ip}:5678")
                 bootstrap_nodes.append((test_ip, 5678))
+                
+            # Also add the hostname of the node0 container
+            if 'railway.app' in this_node_http_address:
+                container_name = f"container_{'_'.join(this_node_http_address.replace('https://', '').replace('http://', '').split('/')[0].split('.'))}_0"
+                logger.info(f"Adding container hostname bootstrap node: {container_name}:5678")
+                bootstrap_nodes.append((container_name, 5678))
+                
+            # And add the hostname itself
+            logger.info(f"Adding hostname bootstrap node: {hostname}:5678")
+            bootstrap_nodes.append((hostname, 5678))
+                
         except Exception as e:
             logger.error(f"Error setting up default bootstrap nodes: {e}")
 
