@@ -674,11 +674,11 @@ async def consensus():
     current_len = len(blockchain.chain)
     max_len = current_len
 
-    active_peers = await get_active_peers_async()
+    active_peers_raw = await get_active_peers_async()
     
-    # Clean up any malformed URLs in the peer list
+    # Clean up any malformed URLs in the peer list FIRST
     sanitized_peers = []
-    for peer in active_peers:
+    for peer in active_peers_raw:
         # Remove any semicolons
         clean_peer = peer.replace(';', '')
         # Ensure URL has a scheme
@@ -689,7 +689,7 @@ async def consensus():
                 clean_peer = f"http://{clean_peer}"
         sanitized_peers.append(clean_peer)
     
-    active_peers = sanitized_peers
+    active_peers = sanitized_peers # Use the sanitized list from now on
     logger.info(f"Found {len(active_peers)} active peers via Kademlia for consensus: {active_peers}")
     
     if not active_peers:
@@ -717,8 +717,10 @@ async def consensus():
     
     valid_chains_count = 0
     error_count = 0
+    # Make sure to iterate using the *sanitized* active_peers list for indexing
+    peer_list_for_indexing = [p for p in active_peers if p != this_node_http_address]
     for i, result in enumerate(results):
-         peer_node = active_peers[i] if i < len(active_peers) else "unknown"
+         peer_node = peer_list_for_indexing[i] if i < len(peer_list_for_indexing) else "unknown"
          if isinstance(result, Exception):
               logger.warning(f"Consensus error fetching chain from {peer_node}: {result}")
               error_count += 1

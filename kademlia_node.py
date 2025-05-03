@@ -288,11 +288,11 @@ class KademliaNode:
             
             # Now that the server has started and protocol is initialized, set timeout and patch RPC methods
             if hasattr(self.server, 'protocol') and self.server.protocol is not None:
-                # Increase RPC timeout to reduce timeout errors
+                # Increase RPC timeout further to reduce timeout errors
                 if hasattr(self.server.protocol, 'timeout'):
-                    # Default is 5 seconds, increase to 15
-                    self.server.protocol.timeout = 15
-                    print(f"Increased RPC timeout to {self.server.protocol.timeout} seconds")
+                    # Default is 5 seconds, increase to 30
+                    self.server.protocol.timeout = 30 
+                    print(f"Increased Kademlia RPC timeout to {self.server.protocol.timeout} seconds")
                 
                 # Detect which API version we're using
                 self._detect_router_api_version()
