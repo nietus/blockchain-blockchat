@@ -236,6 +236,21 @@ def mine_worker():
             # Avoid busy-looping on error
             time.sleep(5)
 
+async def schedule_periodic_consensus(interval_seconds=60):
+    """Periodically runs consensus check in the background."""
+    while True:
+        await asyncio.sleep(interval_seconds) 
+        if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+            logger.info("Running periodic consensus check...")
+            try:
+                # Run consensus directly as it's already an async function
+                await consensus() 
+                logger.info("Periodic consensus check completed.")
+            except Exception as e:
+                logger.error(f"Error during periodic consensus: {e}")
+        else:
+            logger.debug("Skipping periodic consensus check - Kademlia not running.")
+
 def setup_and_run_kademlia():
     global kademlia_node, kademlia_thread
     if kademlia_node and kademlia_node.running:
@@ -1127,17 +1142,20 @@ if __name__ == '__main__':
     logger.info("Started background mining worker thread.")
     
     # Schedule periodic tasks in the Kademlia loop
-    if kademlia_node and kademlia_node.loop:
-        kademlia_node.loop.call_soon_threadsafe(
-            asyncio.ensure_future, refresh_peers_periodically(interval_seconds=30) # Refresh peers every 30s
-        )
-        logger.info("Scheduled periodic peer refresh task.")
-        
-        # Schedule periodic consensus checks
-        kademlia_node.loop.call_soon_threadsafe(
-            asyncio.ensure_future, schedule_periodic_consensus() # Keep consensus separate
-        )
-        logger.info("Scheduled periodic consensus task.")
+    if kademlia_node and kademlia_node.loop and kademlia_node.loop.is_running():
+        try:
+            kademlia_node.loop.call_soon_threadsafe(
+                asyncio.ensure_future, refresh_peers_periodically(interval_seconds=30) # Refresh peers every 30s
+            )
+            logger.info("Scheduled periodic peer refresh task.")
+            
+            # Schedule periodic consensus checks
+            kademlia_node.loop.call_soon_threadsafe(
+                asyncio.ensure_future, schedule_periodic_consensus(interval_seconds=60) # Run consensus every 60s
+            )
+            logger.info("Scheduled periodic consensus task.")
+        except Exception as e:
+             logger.error(f"Error scheduling background tasks: {e}")
         
     # Set up an immediate consensus check after startup
     def immediate_consensus():
