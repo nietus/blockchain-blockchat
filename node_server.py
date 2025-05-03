@@ -180,6 +180,10 @@ kademlia_thread = None
 mining_queue = queue.Queue()
 mining_active = threading.Event() # Event to signal if mining is in progress
 
+# Cache for recently discovered peers
+active_peer_cache = set()
+peer_cache_lock = threading.Lock() # Lock for thread-safe access to the cache
+
 # Handle Railway deployment URL
 railway_url = 'blockchain-bc-production.up.railway.app'
 port = os.environ.get('PORT', os.environ.get('FLASK_RUN_PORT', 8000))
@@ -523,20 +527,10 @@ async def get_active_peers_async():
           return []
 
 def get_http_peers():
-    if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
-        try:
-            future = asyncio.run_coroutine_threadsafe(get_active_peers_async(), kademlia_node.loop)
-            peer_list = future.result(timeout=5)
-            peers = set(p for p in peer_list if p != this_node_http_address) 
-            return peers
-        except asyncio.TimeoutError:
-             logger.error("Timeout getting peers from Kademlia.")
-             return set()
-        except Exception as e:
-            logger.error(f"Error getting peers from Kademlia thread: {e}", exc_info=False)
-            return set()
-    else:
-        return set()
+    # Return the cached list immediately without blocking
+    with peer_cache_lock:
+        # Return a copy to avoid modification issues
+        return set(active_peer_cache)
 
 @bp.route('/register_node', methods=['POST'])
 def register_new_peers():
@@ -1103,6 +1097,26 @@ async def get_peer_chain_info(peer_address):
         logger.error(f"Error getting chain info from {peer_address}: {e}")
         return None
 
+# --- Background Tasks ---
+
+async def refresh_peers_periodically(interval_seconds=60):
+    """Periodically fetches peers via Kademlia and updates the cache."""
+    global active_peer_cache
+    while True:
+        await asyncio.sleep(interval_seconds)
+        if kademlia_node and kademlia_node.running:
+            logger.info("Running periodic peer refresh...")
+            try:
+                peers = await get_active_peers_async() 
+                with peer_cache_lock: 
+                    # Update cache, ensuring self is not included
+                    active_peer_cache = set(p for p in peers if p != this_node_http_address)
+                logger.info(f"Peer cache updated with {len(active_peer_cache)} peers.")
+            except Exception as e:
+                logger.error(f"Error during periodic peer refresh: {e}")
+        else:
+            logger.debug("Skipping periodic peer refresh - Kademlia not running.")
+
 if __name__ == '__main__':
     load_chain() 
     setup_and_run_kademlia()
@@ -1112,22 +1126,20 @@ if __name__ == '__main__':
     miner_thread.start()
     logger.info("Started background mining worker thread.")
     
-    # Schedule periodic consensus checks
-    def schedule_periodic_consensus():
-        while True:
-            try:
-                time.sleep(60)  # Run consensus every 60 seconds
-                if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
-                    asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
-                    logger.info("Periodic consensus check executed")
-            except Exception as e:
-                logger.error(f"Error in periodic consensus: {e}")
-    
-    consensus_thread = threading.Thread(target=schedule_periodic_consensus, daemon=True)
-    consensus_thread.start()
-    
+    # Schedule periodic tasks in the Kademlia loop
+    if kademlia_node and kademlia_node.loop:
+        kademlia_node.loop.call_soon_threadsafe(
+            asyncio.ensure_future, refresh_peers_periodically(interval_seconds=30) # Refresh peers every 30s
+        )
+        logger.info("Scheduled periodic peer refresh task.")
+        
+        # Schedule periodic consensus checks
+        kademlia_node.loop.call_soon_threadsafe(
+            asyncio.ensure_future, schedule_periodic_consensus() # Keep consensus separate
+        )
+        logger.info("Scheduled periodic consensus task.")
+        
     # Set up an immediate consensus check after startup
-    # This is important to ensure quick synchronization
     def immediate_consensus():
         try:
             # Wait a short time for network to establish
