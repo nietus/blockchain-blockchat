@@ -34,6 +34,35 @@ class KademliaNode:
         self.http_address = http_address or f'http://{self.get_ip()}:{os.environ.get("FLASK_RUN_PORT", 8000)}' # Fallback
         self.dht_key = "blockchain_nodes_v2" # Use a distinct key
         
+        # Register additional RPC methods that might be needed by other nodes
+        self._patch_rpc_methods()
+        
+    def _patch_rpc_methods(self):
+        """Add missing RPC methods to the protocol to handle various requests"""
+        if not hasattr(self.server, 'protocol'):
+            # Protocol not initialized yet, will patch after starting
+            return
+            
+        # Add rpc_callFindValue method if it doesn't exist
+        if not hasattr(self.server.protocol, 'rpc_callFindValue'):
+            async def rpc_callFindValue(sender, key):
+                source = (sender[0], sender[1])
+                if hasattr(self.server.protocol, 'router'):
+                    neighbors = self.server.protocol.router.findNeighbors(key, exclude=source)
+                    return {'nodes': neighbors}
+                return {'nodes': []}
+            setattr(self.server.protocol, 'rpc_callFindValue', rpc_callFindValue)
+            
+        # Add rpc_find_value method if it doesn't exist
+        if not hasattr(self.server.protocol, 'rpc_find_value'):
+            async def rpc_find_value(sender, key):
+                source = (sender[0], sender[1])
+                if hasattr(self.server.protocol, 'router'):
+                    neighbors = self.server.protocol.router.findNeighbors(key, exclude=source)
+                    return {'nodes': neighbors}
+                return {'nodes': []}
+            setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
+            
     async def start(self):
         """Start the Kademlia server and join the network"""
         if self.running:
@@ -57,6 +86,9 @@ class KademliaNode:
         await self.server.listen(self.port)
         self.running = True
         print(f"Kademlia DHT node listening on port {self.port}")
+        
+        # Patch RPC methods after protocol is initialized
+        self._patch_rpc_methods()
         
         if self.bootstrap_nodes:
             print(f"Bootstrapping with nodes: {self.bootstrap_nodes}")
@@ -466,6 +498,10 @@ class KademliaNode:
                     
                 # Add the missing method to handle RPC calls
                 setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
+                
+                # Also add the specific method that's missing from logs
+                if not hasattr(self.server.protocol, 'rpc_callFindValue'):
+                    setattr(self.server.protocol, 'rpc_callFindValue', rpc_find_value)
                 
                 # Add support for making calls
                 async def call_find_value(node_tuple, key_bytes):
