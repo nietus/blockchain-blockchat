@@ -636,6 +636,21 @@ async def consensus():
     max_len = current_len
 
     active_peers = await get_active_peers_async()
+    
+    # Clean up any malformed URLs in the peer list
+    sanitized_peers = []
+    for peer in active_peers:
+        # Remove any semicolons
+        clean_peer = peer.replace(';', '')
+        # Ensure URL has a scheme
+        if not clean_peer.startswith(('http://', 'https://')):
+            if 'railway.app' in clean_peer:
+                clean_peer = f"https://{clean_peer}"
+            else:
+                clean_peer = f"http://{clean_peer}"
+        sanitized_peers.append(clean_peer)
+    
+    active_peers = sanitized_peers
     logger.info(f"Found {len(active_peers)} active peers via Kademlia for consensus: {active_peers}")
     
     if not active_peers:
@@ -711,6 +726,9 @@ async def fetch_chain_from_peer(node_address):
          else:
              node_address = f"http://{node_address}"
          logger.info(f"Added scheme to URL: {node_address}")
+     
+     # Remove any semicolons that might be in the URL
+     node_address = node_address.replace(';', '')
      
      # For Railway deployment with node paths, ensure URL is properly formed
      if '/node' in node_address:
@@ -805,6 +823,9 @@ def announce_new_block(block_dict):
                  if not base_url.startswith(('http://', 'https://')):
                      base_url = f"https://{base_url}"
                      logger.info(f"Added https scheme to Railway URL: {base_url}")
+                 
+                 # Remove any semicolons that might be in the URL
+                 base_url = base_url.replace(';', '')
                      
                  # Strip any existing node prefix
                  if '/node' in base_url:
@@ -884,6 +905,9 @@ def send_announcement(node_address, data, headers):
          else:
              node_address = f"http://{node_address}"
          logger.info(f"Added scheme to announcement URL: {node_address}")
+     
+     # Remove any semicolons that might be in the URL
+     node_address = node_address.replace(';', '')
      
      # For Railway deployment with node paths, we need to make sure the URL includes /add_block properly
      if '/node' in node_address:
@@ -1016,6 +1040,9 @@ async def get_peer_chain_info(peer_address):
             else:
                 peer_address = f"http://{peer_address}"
             logger.info(f"Added scheme to peer URL: {peer_address}")
+        
+        # Remove any semicolons that might be in the URL
+        peer_address = peer_address.replace(';', '')
         
         # For Railway deployment with node paths, ensure URL is properly formed
         if '/node' in peer_address:

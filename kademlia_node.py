@@ -159,6 +159,9 @@ class KademliaNode:
                                         http_address = f"https://{http_address}"
                                         print(f"Added https scheme to Railway URL: {http_address}")
                                     
+                                    # Remove any semicolons that might be in the URL
+                                    http_address = http_address.replace(';', '')
+                                    
                                     # If there's already a node prefix, use it
                                     if '/node' in http_address and not http_address.endswith('/'):
                                         print(f"Adding Railway peer with prefixed address: {http_address}")
@@ -204,6 +207,9 @@ class KademliaNode:
                     base_url = f"https://{base_url}"
                     print(f"Added https scheme to base URL: {base_url}")
                 
+                # Remove any semicolons that might be in the URL
+                base_url = base_url.replace(';', '')
+                
                 # Strip any existing node prefix
                 if '/node' in base_url:
                     base_url = base_url.split('/node')[0]
@@ -231,35 +237,37 @@ class KademliaNode:
                     
                     # Try different ping approaches based on kademlia library version
                     try:
-                        # Simplest approach - just use the ping method
-                        ping_future = self.server.ping(node)
-                        result = await asyncio.wait_for(ping_future, timeout=2)
-                        if result:
-                            print(f"Found active node at {ip}:{test_port}")
+                        # Most reliable: check if we can send a find_node query 
+                        # which works across more kademlia implementations
+                        find_id = digest(random.getrandbits(255).to_bytes(32, byteorder='big'))
+                        find_future = self.server.protocol.callFindNode(node, find_id)
+                        result = await asyncio.wait_for(find_future, timeout=2)
+                        if result and isinstance(result, list):
+                            print(f"Found active node at {ip}:{test_port} via find_node query")
                             
                             # Construct standard HTTP address format
                             http_port = 8000 + port_offset  # Convention: HTTP port = 8000 + offset
                             http_address = f"http://{ip}:{http_port}"
                             if http_address != self.http_address:  # Don't add self
-                                print(f"Adding discovered peer via ping: {http_address}")
+                                print(f"Adding discovered peer via find_node: {http_address}")
                                 peers.add(http_address)
-                    except (AttributeError, TypeError) as e:
-                        print(f"First ping method failed: {e}, trying protocol ping")
-                        # Try older protocol ping
+                    except Exception as e:
+                        print(f"Find_node probe failed: {e}, trying simpler approach")
+                        # Try simplest approach possible
                         try:
-                            # Try protocol level ping
-                            ping_future = self.server.protocol.ping(node)
-                            await asyncio.wait_for(ping_future, timeout=2)
-                            print(f"Found active node with protocol ping at {ip}:{test_port}")
-                            
-                            # Construct standard HTTP address format
-                            http_port = 8000 + port_offset
-                            http_address = f"http://{ip}:{http_port}"
-                            if http_address != self.http_address:
-                                print(f"Adding discovered peer via protocol ping: {http_address}")
-                                peers.add(http_address)
+                            # Check if node exists in the routing table
+                            if self.server.protocol.router.isNewNode(node):
+                                print(f"Node {ip}:{test_port} is not in routing table")
+                            else:
+                                print(f"Found known node at {ip}:{test_port}")
+                                # Construct standard HTTP address format
+                                http_port = 8000 + port_offset
+                                http_address = f"http://{ip}:{http_port}"
+                                if http_address != self.http_address:
+                                    print(f"Adding discovered peer via routing table: {http_address}")
+                                    peers.add(http_address)
                         except Exception as e2:
-                            print(f"Protocol ping also failed: {e2}")
+                            print(f"Routing table check failed: {e2}")
                             pass
                 except Exception as e:
                     # Expected to fail for nodes that don't exist, only print for unexpected errors
