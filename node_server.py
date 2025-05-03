@@ -427,34 +427,19 @@ def get_chain():
     if not blockchain:
          return "Blockchain not initialized", 500
     
-    # Check if we should verify synchronization before returning data
-    should_verify = request.args.get('verify', 'false').lower() == 'true'
+    # Remove the blocking verification logic
+    # Consistency is handled by background consensus tasks
+    # should_verify = request.args.get('verify', 'false').lower() == 'true'
+    # if should_verify and kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
+    #    ...
     
-    if should_verify and kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
-        try:
-            # Quick check to ensure this node is in sync before returning data
-            logger.info("Verifying blockchain synchronization before returning chain data")
-            
-            # Run a non-blocking check to see if the current node's chain is consistent with others
-            future = asyncio.run_coroutine_threadsafe(verify_chain_consistency(), kademlia_node.loop)
-            is_consistent = future.result(timeout=5)
-            
-            if not is_consistent:
-                # If our chain might be out of date, try to sync first
-                logger.warning("Chain appears to be out of sync. Running consensus before returning data.")
-                consensus_future = asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
-                consensus_future.result(timeout=10)  # Wait for sync to complete
-                logger.info("Consensus completed. Returning updated chain data.")
-        except Exception as e:
-            logger.error(f"Error during pre-response verification: {e}")
-            # Continue with returning data even if verification fails
-    
+    logger.info("Returning current blockchain state.")
     chain_data = [block.to_dict() for block in blockchain.chain]
-    active_peers = get_http_peers()
+    active_peers = get_http_peers() # This still has a small timeout, might need optimization later
     return json.dumps({"length": len(chain_data),
                        "chain": chain_data,
-                       "peers": list(active_peers),
-                       "verified": should_verify})
+                       "peers": list(active_peers)})
+                       # "verified": should_verify})
 
 @bp.route('/mine', methods=['GET'])
 @bp.route('/mine/', methods=['GET'])
@@ -547,45 +532,28 @@ def verify_and_add_block():
         # Case 2: We're behind - the new block builds on something we don't have
         elif block_data['index'] > last_block.index + 1:
             logger.warning(f"Received block #{block_data['index']} but we're at #{last_block.index}. We're behind.")
-            # We've missed some blocks, need to sync
+            # We've missed some blocks, schedule a sync
             if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
-                logger.info("Triggering immediate consensus due to received advanced block")
-                future = asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
-                try:
-                    synced = future.result(timeout=10)
-                    if synced:
-                        logger.info(f"Chain successfully synced. New length: {len(blockchain.chain)}")
-                        # After syncing, try to add the block again if we still don't have it
-                        if not any(b.hash == block_data['hash'] for b in blockchain.chain):
-                            logger.info("Attempting to add received block after sync")
-                            # Check if we can add it now
-                            last_block = blockchain.last_block
-                            if block_data['previous_hash'] == last_block.hash and block_data['index'] == last_block.index + 1:
-                                block = Block(block_data['index'], block_data['transactions'], 
-                                              block_data['timestamp'], block_data['previous_hash'], 
-                                              block_data['nonce'])
-                                if blockchain.add_block(block, block_data['hash']):
-                                    logger.info(f"Block #{block.index} added after sync")
-                                    save_chain()
-                                    return "Block added after chain sync", 201
-                    else:
-                        logger.warning("Chain sync completed but still can't add block")
-                        return "Block accepted but chain sync didn't reach it yet", 202
-                except asyncio.TimeoutError:
-                    logger.error("Timeout during sync chain in add_block")
-                    return "Chain sync timed out, try again later", 202
-                except Exception as e:
-                    logger.error(f"Error syncing chain in add_block: {e}")
+                logger.info("Scheduling background consensus due to received advanced block")
+                # Schedule consensus() to run in the Kademlia event loop without waiting
+                kademlia_node.loop.call_soon_threadsafe(asyncio.ensure_future, consensus())
+            else:
+                logger.warning("Cannot schedule sync, Kademlia node not running")
             
-            return "Block acknowledged, chain syncing", 202
+            # Respond immediately that we've acknowledged the block and are syncing
+            return "Block acknowledged, chain synchronization scheduled", 202
             
         # Case 3: Block is from a fork or alternative chain (same index but different content)
         elif block_data['index'] == last_block.index and block_data['hash'] != last_block.hash:
             logger.warning(f"Received block #{block_data['index']} appears to be from a fork. Triggering consensus.")
-            # We might be on a fork, need to determine the canonical chain
+            # We might be on a fork, schedule a consensus check
             if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
-                asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
-            return "Block from potential fork received, running consensus", 202
+                logger.info("Scheduling background consensus due to potential fork")
+                kademlia_node.loop.call_soon_threadsafe(asyncio.ensure_future, consensus())
+            else:
+                logger.warning("Cannot schedule consensus, Kademlia node not running")
+                
+            return "Block from potential fork received, consensus scheduled", 202
             
         # Case 4: Received an older block
         elif block_data['index'] < last_block.index:
@@ -618,19 +586,13 @@ def sync_blockchain():
     
     if kademlia_node and kademlia_node.running and kademlia_node.loop.is_running():
         try:
-            logger.info("Explicitly triggering blockchain synchronization")
-            future = asyncio.run_coroutine_threadsafe(consensus(), kademlia_node.loop)
-            result = future.result(timeout=10)
-            if result:
-                return "Blockchain successfully synchronized with network", 200
-            else:
-                return "Synchronization completed, no updates needed", 200
-        except asyncio.TimeoutError:
-            logger.error("Timeout during explicit blockchain synchronization")
-            return "Synchronization timed out, try again later", 500
+            logger.info("Scheduling background blockchain synchronization")
+            # Schedule consensus() to run in the Kademlia event loop without waiting
+            kademlia_node.loop.call_soon_threadsafe(asyncio.ensure_future, consensus())
+            return "Blockchain synchronization scheduled", 202 # Return 202 Accepted
         except Exception as e:
-            logger.error(f"Error during explicit blockchain synchronization: {e}")
-            return f"Synchronization error: {str(e)}", 500
+            logger.error(f"Error scheduling background blockchain synchronization: {e}")
+            return f"Error scheduling synchronization: {str(e)}", 500
     else:
         logger.error("Cannot sync blockchain: Kademlia node not running")
         return "Cannot sync - P2P network node not running", 500
