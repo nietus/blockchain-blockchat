@@ -200,29 +200,92 @@ def setup_and_run_kademlia():
     kademlia_port = int(os.environ.get('KADEMLIA_PORT', 5678))
     kademlia_bootstrap_env = os.environ.get('KADEMLIA_BOOTSTRAP', '')
     bootstrap_nodes = []
+    
+    # Extract bootstrap nodes from environment
     if kademlia_bootstrap_env:
         for node_str in kademlia_bootstrap_env.split(','):
             if node_str.strip():
                 try:
                     host, port_str = node_str.strip().split(':')
                     bootstrap_nodes.append((host, int(port_str)))
+                    logger.info(f"Added bootstrap node: {host}:{port_str}")
                 except ValueError:
                     logger.warning(f"Invalid bootstrap node format: {node_str}. Ignoring.")
+    
+    # If no bootstrap nodes from environment and we're not the first node, 
+    # try some reasonable defaults based on common container patterns
+    if not bootstrap_nodes and kademlia_port > 5678:  # Not the first node
+        try:
+            # Assume Docker or similar environment, try default port on container network
+            hostname = socket.gethostname()
+            # Try to use IP resolution
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+            s.close()
+            
+            # Derive network prefix from our IP
+            ip_parts = ip.split('.')
+            network_prefix = '.'.join(ip_parts[:-1])
+            
+            # Try a few nodes in the same subnet with the bootstrap port
+            for i in range(1, 5):
+                test_ip = f"{network_prefix}.{i}"
+                # Skip if it's our own IP
+                if test_ip == ip:
+                    continue
+                logger.info(f"Adding default bootstrap node: {test_ip}:5678")
+                bootstrap_nodes.append((test_ip, 5678))
+        except Exception as e:
+            logger.error(f"Error setting up default bootstrap nodes: {e}")
+
+    # Get the real HTTP address
+    if '127.0.0.1' in this_node_http_address or 'localhost' in this_node_http_address:
+        # Try to get a better IP
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+            s.close()
+            
+            # Extract the port from the existing address
+            port = this_node_http_address.split(':')[-1]
+            # Create a new address with the real IP
+            real_http_address = f"http://{ip}:{port}"
+            logger.info(f"Using real IP address for HTTP: {real_http_address} (was {this_node_http_address})")
+        except Exception as e:
+            logger.error(f"Error determining real IP: {e}")
+            real_http_address = this_node_http_address
+    else:
+        real_http_address = this_node_http_address
 
     logger.info(f"Initializing Kademlia DHT on port {kademlia_port} with bootstrap nodes: {bootstrap_nodes}")
     try:
         kademlia_node = KademliaNode(port=kademlia_port, 
                                    bootstrap_nodes=bootstrap_nodes,
-                                   http_address=this_node_http_address)
+                                   http_address=real_http_address)
         kademlia_thread = kademlia_node.run_in_thread()
         if not kademlia_node.running:
              logger.error("Kademlia thread started but node failed to run (maybe port conflict?)")
         else:
              logger.info("Kademlia node started successfully in background thread.")
              
+             # Force an initial peer refresh after startup
+             def delayed_peer_refresh():
+                time.sleep(5)  # Wait for network to stabilize
+                try:
+                    # Force registration refresh
+                    if kademlia_node.running and kademlia_node.loop.is_running():
+                        logger.info("Forcing initial peer registration refresh")
+                        asyncio.run_coroutine_threadsafe(kademlia_node.register_self(), kademlia_node.loop)
+                except Exception as e:
+                    logger.error(f"Error in delayed peer refresh: {e}")
+                    
+             threading.Thread(target=delayed_peer_refresh, daemon=True).start()
+             
     except Exception as e:
         logger.error(f"Failed to initialize or run Kademlia node: {e}", exc_info=True)
-        kademlia_node = None 
+        kademlia_node = None
 
 def ensure_data_directory():
     data_dir = os.path.dirname(data_file_path)
@@ -574,26 +637,42 @@ async def consensus():
 
     active_peers = await get_active_peers_async()
     logger.info(f"Found {len(active_peers)} active peers via Kademlia for consensus.")
+    
+    if not active_peers:
+        logger.warning("No peers available for consensus. Chain remains unchanged.")
+        return False
 
     tasks = []
     for node in active_peers:
          if node == this_node_http_address: continue
+         logger.info(f"Adding task to fetch chain from peer: {node}")
          tasks.append(fetch_chain_from_peer(node))
+    
+    if not tasks:
+        logger.warning("No valid peer tasks created for consensus")
+        return False
          
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
-    valid_peer_chains = []
+    valid_chains_count = 0
+    error_count = 0
     for i, result in enumerate(results):
-         peer_node = list(active_peers)[i] if i < len(active_peers) else "unknown"
+         peer_node = active_peers[i] if i < len(active_peers) else "unknown"
          if isinstance(result, Exception):
               logger.warning(f"Consensus error fetching chain from {peer_node}: {result}")
+              error_count += 1
+         elif result is None:
+              logger.warning(f"Null result when fetching chain from {peer_node}")
          elif result:
+              valid_chains_count += 1
               length, chain = result
+              logger.info(f"Received valid chain from {peer_node} with length {length}")
               if length > max_len and blockchain.check_chain_validity(chain):
-                   logger.info(f"Longer valid chain found at {peer_node} (length {length})")
+                   logger.info(f"Longer valid chain found at {peer_node} (length {length} > {max_len})")
                    max_len = length
                    longest_chain = chain
-         pass
+    
+    logger.info(f"Consensus summary: {valid_chains_count} valid chains, {error_count} errors, current length: {current_len}, max found: {max_len}")
 
     if longest_chain:
         blockchain.chain = longest_chain 
@@ -605,10 +684,25 @@ async def consensus():
         return False
 
 async def fetch_chain_from_peer(node_address):
-     logger.debug(f"Fetching chain from {node_address}...")
+     logger.info(f"Fetching chain from {node_address}...")
      try:
           loop = asyncio.get_running_loop()
-          response = await loop.run_in_executor(None, lambda: requests.get(f'{node_address}/chain', timeout=10))  # Increased timeout from 5 to 10 seconds
+          # First try with a HEAD request to check if the node is responding at all
+          try:
+              head_response = await loop.run_in_executor(None, lambda: requests.head(
+                  f'{node_address}/chain', 
+                  timeout=3
+              ))
+              head_response.raise_for_status()
+          except Exception as e:
+              logger.warning(f"Node {node_address} not responding to HEAD request: {e}")
+              return None
+          
+          # If HEAD request worked, proceed with full GET
+          response = await loop.run_in_executor(None, lambda: requests.get(
+              f'{node_address}/chain', 
+              timeout=10
+          ))
           response.raise_for_status() 
           data = response.json()
           length = data.get('length', 0)
@@ -617,6 +711,8 @@ async def fetch_chain_from_peer(node_address):
           if not chain_dump:
                logger.warning(f"Received empty chain from {node_address}")
                return None
+          
+          logger.info(f"Received chain data from {node_address} with {length} blocks")
           
           # Create Block objects for validation
           chain_objects = []
@@ -629,6 +725,11 @@ async def fetch_chain_from_peer(node_address):
                     
                if not chain_objects:
                     logger.warning(f"Failed to convert chain data from {node_address} to Block objects")
+                    return None
+                    
+               # Check first block to make sure it's a genesis block
+               if chain_objects[0].index != 0 or chain_objects[0].previous_hash != "0":
+                    logger.warning(f"First block from {node_address} is not a valid genesis block")
                     return None
                     
                if Blockchain.check_chain_validity(chain_objects):
@@ -644,23 +745,54 @@ async def fetch_chain_from_peer(node_address):
                logger.error(f"Error processing chain data from {node_address}: {e}")
                return None
      except requests.exceptions.Timeout:
-          logger.warning(f"Timeout fetching chain from {node_address}")
+          logger.error(f"Timeout fetching chain from {node_address}")
           return None
-     except requests.exceptions.RequestException as e:
-          logger.warning(f"Request error fetching chain from {node_address}: {e}")
-          return None
-     except json.JSONDecodeError as e:
-          logger.error(f"JSON decode error from {node_address}: {e}")
+     except requests.exceptions.ConnectionError:
+          logger.error(f"Connection error fetching chain from {node_address}")
           return None
      except Exception as e:
-          logger.error(f"Unexpected error fetching chain from {node_address}: {e}", exc_info=True)
+          logger.error(f"Unexpected error fetching chain from {node_address}: {e}")
           return None
 
 def announce_new_block(block_dict):
     active_peers = get_http_peers()
     if not active_peers:
          logger.info("No active peers found via Kademlia to announce block to.")
-         return
+         
+         # If no peers via Kademlia, try some heuristic approaches
+         # Based on common network configurations
+         try:
+             hostname = socket.gethostname()
+             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+             s.connect(('8.8.8.8', 80))
+             ip = s.getsockname()[0]
+             s.close()
+             
+             # Extract port from our HTTP address
+             our_port = int(this_node_http_address.split(':')[-1])
+             
+             # Try nodes on adjacent ports
+             for port_offset in range(1, 5):
+                 # Try both higher and lower port numbers
+                 for direction in [1, -1]:
+                     if direction == -1 and our_port + direction * port_offset <= 0:
+                         continue  # Skip invalid port
+                     
+                     test_port = our_port + direction * port_offset
+                     test_addr = f"http://{ip}:{test_port}"
+                     
+                     # Don't add our own address
+                     if test_addr == this_node_http_address:
+                         continue
+                         
+                     logger.info(f"Adding heuristic peer for announcement: {test_addr}")
+                     active_peers.add(test_addr)
+         except Exception as e:
+             logger.error(f"Error finding heuristic peers: {e}")
+         
+         if not active_peers:
+             logger.warning("Still no peers found after heuristic search. Block announcement skipped.")
+             return
          
     logger.info(f"Announcing new block #{block_dict['index']} to {len(active_peers)} peers: {active_peers}")
     block_json = json.dumps(block_dict, sort_keys=True)
@@ -689,18 +821,40 @@ def announce_new_block(block_dict):
 
 def send_announcement(node_address, data, headers):
      url = f"{node_address}/add_block"
-     try:
-          response = requests.post(url, data=data, headers=headers, timeout=5)  # Increased timeout from 3 to 5 seconds
-          if response.status_code == 201:
-              logger.info(f"Successfully announced block to {node_address}")
-          else:
-              logger.warning(f"Block announcement to {node_address} returned status {response.status_code}: {response.text}")
-     except requests.exceptions.Timeout:
-          logger.warning(f"Timeout announcing block to {node_address}")
-     except requests.exceptions.RequestException as e:
-          logger.warning(f"Failed to announce block to {node_address}: {e}")
-     except Exception as e:
-          logger.error(f"Unexpected error announcing block to {node_address}: {e}")
+     
+     # Try up to 3 times with increasing timeouts
+     for attempt in range(3):
+         try:
+             timeout = 3 + attempt * 2  # 3, 5, 7 seconds
+             logger.info(f"Announcing block to {node_address} (attempt {attempt+1}, timeout {timeout}s)")
+             response = requests.post(url, data=data, headers=headers, timeout=timeout)
+             
+             if response.status_code == 201:
+                 logger.info(f"Successfully announced block to {node_address}")
+                 return
+             elif response.status_code == 202:
+                 # Accepted but processing, might need to retry
+                 logger.info(f"Block announcement partially accepted by {node_address}: {response.text}")
+                 # Wait a bit before the next retry
+                 time.sleep(1)
+             else:
+                 logger.warning(f"Block announcement to {node_address} returned status {response.status_code}: {response.text}")
+                 # Wait a bit before the next retry
+                 time.sleep(1)
+                 
+         except requests.exceptions.Timeout:
+             logger.warning(f"Timeout announcing block to {node_address} (attempt {attempt+1})")
+             # Continue to next attempt
+         except requests.exceptions.ConnectionError:
+             logger.warning(f"Connection error announcing block to {node_address}")
+             # Problem with the connection, break early
+             break
+         except Exception as e:
+             logger.error(f"Unexpected error announcing block to {node_address}: {e}")
+             # Break on unexpected errors
+             break
+     
+     logger.warning(f"Failed to announce block to {node_address} after multiple attempts")
 
 # Add a new function to verify chain consistency without modifying it
 async def verify_chain_consistency():

@@ -137,21 +137,58 @@ class KademliaNode:
                 for i, result in enumerate(results):
                     node_id = list(potential_node_ids)[i]
                     if isinstance(result, Exception) or result is None:
-                        # print(f"Could not retrieve data for node {node_id}: {result}")
+                        print(f"Could not retrieve data for node {node_id}: {result}")
                         continue
                     try:
                         node_data = json.loads(result)
+                        print(f"Retrieved node data for {node_id}: {node_data}")
+                        
                         # Check timestamp for freshness
                         if current_time - node_data.get('timestamp', 0) < timeout_seconds:
-                            if node_data.get('http_address') and node_data.get('node_id') != self.node_id.hex():
-                                 peers.add(node_data['http_address'])
-                        # else:
-                             # print(f"Node {node_id} data is stale.")
+                            http_address = node_data.get('http_address')
+                            if http_address and node_data.get('node_id') != self.node_id.hex():
+                                print(f"Adding peer with HTTP address: {http_address}")
+                                peers.add(http_address)
+                            else:
+                                print(f"Skipping node {node_id}: missing HTTP address or is self")
+                        else:
+                            timestamp = node_data.get('timestamp', 0)
+                            age = current_time - timestamp
+                            print(f"Node {node_id} data is stale: age={age}s, timeout={timeout_seconds}s")
 
                     except json.JSONDecodeError:
                         print(f"Could not decode JSON for node {node_id}: {result}")
                     except Exception as e:
                         print(f"Error processing data for node {node_id}: {e}")
+
+            # Add direct querying for nodes we know might be in the network
+            # This can help if the routing table doesn't have complete info
+            for port_offset in range(5):  # Try a few potential ports
+                try:
+                    ip = self.get_ip()
+                    test_port = 5678 + port_offset  # Common Kademlia ports
+                    
+                    # Skip our own port
+                    if test_port == self.port:
+                        continue
+                        
+                    print(f"Directly probing potential node at {ip}:{test_port}")
+                    node = (ip, test_port)
+                    
+                    # Try to ping this node directly
+                    ping_future = self.server.protocol.ping(node)
+                    await asyncio.wait_for(ping_future, timeout=2)
+                    print(f"Found active node at {ip}:{test_port}")
+                    
+                    # Construct standard HTTP address format
+                    http_port = 8000 + port_offset  # Convention: HTTP port = 8000 + offset
+                    http_address = f"http://{ip}:{http_port}"
+                    if http_address != self.http_address:  # Don't add self
+                        print(f"Adding discovered peer via direct probe: {http_address}")
+                        peers.add(http_address)
+                except Exception as e:
+                    # Expected to fail for nodes that don't exist
+                    pass
 
         except Exception as e:
             print(f"Error during Kademlia peer discovery: {e}")
@@ -163,8 +200,28 @@ class KademliaNode:
     
     def get_ip(self):
         """Get the local IP address usable within the Docker network."""
-        # Inside Docker, hostname usually resolves correctly for inter-container communication
-        return socket.gethostname()
+        # First try to get the hostname (works well in Docker)
+        hostname = socket.gethostname()
+        
+        try:
+            # Try to resolve hostname to IP address
+            ip = socket.gethostbyname(hostname)
+            # If this is localhost or loopback, try another approach
+            if ip.startswith('127.') or ip == '::1':
+                raise ValueError("Got loopback address")
+            return ip
+        except Exception:
+            # Fallback: try to get IP by creating a socket connection
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                # Doesn't need to be reachable, just to determine interface IP
+                s.connect(('8.8.8.8', 80))
+                ip = s.getsockname()[0]
+                s.close()
+                return ip
+            except Exception:
+                # Last resort: use the hostname (used in Docker internal networks)
+                return hostname
     
     def run_in_thread(self):
         """Run the Kademlia node's asyncio loop in a separate thread."""
