@@ -34,80 +34,113 @@ class KademliaNode:
         self.http_address = http_address or f'http://{self.get_ip()}:{os.environ.get("FLASK_RUN_PORT", 8000)}' # Fallback
         self.dht_key = "blockchain_nodes_v2" # Use a distinct key
         
-        # Register additional RPC methods that might be needed by other nodes
-        self._patch_rpc_methods()
+        # We'll patch RPC methods after the server is started and protocol is initialized
         
     def _patch_rpc_methods(self):
         """Add missing RPC methods to the protocol to handle various requests"""
-        if not hasattr(self.server, 'protocol'):
-            # Protocol not initialized yet, will patch after starting
-            return
+        try:
+            if not hasattr(self.server, 'protocol') or self.server.protocol is None:
+                print("Protocol not initialized yet, cannot patch RPC methods")
+                return
+                
+            print(f"Patching RPC methods for Kademlia protocol on port {self.port}")
             
-        # Add rpc_callFindValue method if it doesn't exist
-        if not hasattr(self.server.protocol, 'rpc_callFindValue'):
-            async def rpc_callFindValue(sender, key):
-                source = (sender[0], sender[1])
-                if hasattr(self.server.protocol, 'router'):
-                    neighbors = self.server.protocol.router.findNeighbors(key, exclude=source)
-                    return {'nodes': neighbors}
-                return {'nodes': []}
-            setattr(self.server.protocol, 'rpc_callFindValue', rpc_callFindValue)
-            
-        # Add rpc_find_value method if it doesn't exist
-        if not hasattr(self.server.protocol, 'rpc_find_value'):
-            async def rpc_find_value(sender, key):
-                source = (sender[0], sender[1])
-                if hasattr(self.server.protocol, 'router'):
-                    neighbors = self.server.protocol.router.findNeighbors(key, exclude=source)
-                    return {'nodes': neighbors}
-                return {'nodes': []}
-            setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
-            
+            # Add rpc_callFindValue method if it doesn't exist
+            if not hasattr(self.server.protocol, 'rpc_callFindValue'):
+                async def rpc_callFindValue(sender, key):
+                    source = (sender[0], sender[1])
+                    if hasattr(self.server.protocol, 'router'):
+                        neighbors = self.server.protocol.router.findNeighbors(key, exclude=source)
+                        return {'nodes': neighbors}
+                    return {'nodes': []}
+                setattr(self.server.protocol, 'rpc_callFindValue', rpc_callFindValue)
+                print("Added rpc_callFindValue method to protocol")
+                
+            # Add rpc_find_value method if it doesn't exist
+            if not hasattr(self.server.protocol, 'rpc_find_value'):
+                async def rpc_find_value(sender, key):
+                    source = (sender[0], sender[1])
+                    if hasattr(self.server.protocol, 'router'):
+                        neighbors = self.server.protocol.router.findNeighbors(key, exclude=source)
+                        return {'nodes': neighbors}
+                    return {'nodes': []}
+                setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
+                print("Added rpc_find_value method to protocol")
+                
+            print("Successfully patched all required RPC methods")
+        except Exception as e:
+            print(f"Error patching RPC methods: {e}")
+            import traceback
+            traceback.print_exc()
+        
     async def start(self):
         """Start the Kademlia server and join the network"""
         if self.running:
             print(f"Kademlia DHT already running on port {self.port}")
             return
-            
+        
         try:
-            test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            test_socket.bind(('0.0.0.0', self.port))
-            test_socket.close()
-        except OSError as e:
-            if e.errno == 98:
-                print(f"Port {self.port} is already in use. Assuming existing instance.")
-                # Maybe try to connect to the existing instance?
-                # For now, we just won't start a new server.
-                self.running = False # Indicate we didn't start it
-                return
-            raise
+            # Test if port is available
+            try:
+                test_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                test_socket.bind(('0.0.0.0', self.port))
+                test_socket.close()
+            except OSError as e:
+                if e.errno == 98:
+                    print(f"Port {self.port} is already in use. Assuming existing instance.")
+                    # Maybe try to connect to the existing instance?
+                    # For now, we just won't start a new server.
+                    self.running = False # Indicate we didn't start it
+                    return
+                raise
             
-        await self.server.listen(self.port)
-        self.running = True
-        print(f"Kademlia DHT node listening on port {self.port}")
-        
-        # Patch RPC methods after protocol is initialized
-        self._patch_rpc_methods()
-        
-        if self.bootstrap_nodes:
-            print(f"Bootstrapping with nodes: {self.bootstrap_nodes}")
-            # Use ensure_future for non-blocking bootstrap
-            tasks = [self.server.bootstrap([(host, port)]) for host, port in self.bootstrap_nodes]
-            await asyncio.gather(*tasks)
-            print("Bootstrap process initiated.")
-        
-        # Store richer node information
-        self.node_info = {
-            "kad_host": self.get_ip(),
-            "kad_port": self.port,
-            "http_address": self.http_address,
-            "node_id": self.node_id.hex(), # Use hex for JSON compatibility
-            "timestamp": asyncio.get_event_loop().time()
-        }
-        # Register asynchronously
-        asyncio.ensure_future(self.register_self())
-        print("Node registration scheduled.")
+            # Start the server
+            print(f"Starting Kademlia DHT server on port {self.port}...")
+            await self.server.listen(self.port)
+            self.running = True
+            print(f"Kademlia DHT node listening on port {self.port}")
+            
+            # Now that the server has started and protocol is initialized, patch RPC methods
+            if hasattr(self.server, 'protocol') and self.server.protocol is not None:
+                self._patch_rpc_methods()
+            else:
+                print(f"Warning: Server started but protocol is not initialized, cannot patch RPC methods")
+            
+            if self.bootstrap_nodes:
+                print(f"Bootstrapping with nodes: {self.bootstrap_nodes}")
+                # Use ensure_future for non-blocking bootstrap
+                bootstrap_tasks = []
+                for host, port in self.bootstrap_nodes:
+                    try:
+                        task = self.server.bootstrap([(host, port)])
+                        bootstrap_tasks.append(task)
+                    except Exception as e:
+                        print(f"Error creating bootstrap task for {host}:{port}: {e}")
+                if bootstrap_tasks:
+                    await asyncio.gather(*bootstrap_tasks)
+                    print("Bootstrap process initiated.")
+                else:
+                    print("No valid bootstrap tasks could be created.")
+            
+            # Store richer node information
+            self.node_info = {
+                "kad_host": self.get_ip(),
+                "kad_port": self.port,
+                "http_address": self.http_address,
+                "node_id": self.node_id.hex(), # Use hex for JSON compatibility
+                "timestamp": asyncio.get_event_loop().time()
+            }
+            # Register asynchronously
+            asyncio.ensure_future(self.register_self())
+            print("Node registration scheduled.")
+            
+        except Exception as e:
+            self.running = False
+            print(f"Error starting Kademlia node: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     
     async def register_self(self):
         """Register this node in the DHT under a specific key"""
