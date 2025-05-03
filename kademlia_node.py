@@ -92,10 +92,30 @@ class KademliaNode:
             # First, ensure we're bootstrapped if possible
             if self.bootstrap_nodes and hasattr(self.server, 'bootstrap'):
                 # Try re-bootstrapping to find more peers if we don't have many
-                if len(self.server.protocol.router.getNodes()) < 3:
-                    print("Re-bootstrapping to find more peers before registering")
-                    for host, port in self.bootstrap_nodes:
-                        await self.server.bootstrap([(host, port)])
+                try:
+                    # Check if we have neighbors using a safer approach
+                    has_neighbors = False
+                    try:
+                        # Try different router API approaches based on Kademlia version
+                        if hasattr(self.server.protocol.router, 'getNodes'):
+                            has_neighbors = len(self.server.protocol.router.getNodes()) > 0
+                        elif hasattr(self.server.protocol.router, 'get_nodes'):
+                            has_neighbors = len(self.server.protocol.router.get_nodes()) > 0
+                        elif hasattr(self.server.protocol.router, 'buckets'):
+                            has_neighbors = any(len(bucket.nodes) > 0 for bucket in self.server.protocol.router.buckets)
+                        else:
+                            # If we can't determine neighbors, assume we need to bootstrap
+                            has_neighbors = False
+                    except Exception as e:
+                        print(f"Error checking for neighbors: {e}")
+                        has_neighbors = False
+                        
+                    if not has_neighbors:
+                        print("Re-bootstrapping to find more peers before registering")
+                        for host, port in self.bootstrap_nodes:
+                            await self.server.bootstrap([(host, port)])
+                except Exception as e:
+                    print(f"Error during bootstrap: {e}")
             
             # Wait a moment for bootstrap to have an effect
             await asyncio.sleep(0.5)
@@ -107,8 +127,9 @@ class KademliaNode:
             await self.server.set(self.node_id.hex(), json.dumps(self.node_info))
             print(f"Successfully registered node {self.node_id.hex()} in the DHT.")
             
-            # If we're bootstrapped and have neighbors, also store under the common key
-            if len(self.server.protocol.router.getNodes()) > 0:
+            # Next, always try to store in the common registry regardless of
+            # whether we can check for neighbors or not
+            try:
                 # Try to read the existing registry first
                 try:
                     registry_value = await self.server.get(common_key)
@@ -128,8 +149,8 @@ class KademliaNode:
                 # Store the updated registry
                 await self.server.set(common_key, json.dumps(registry))
                 print(f"Added node to common registry: {self.node_id.hex()}")
-            else:
-                print("No neighbors in routing table to store common registry")
+            except Exception as e:
+                print(f"Error updating common registry: {e}")
                 
         except Exception as e:
              print(f"Error registering node {self.node_id.hex()} in DHT: {e}")
@@ -199,14 +220,41 @@ class KademliaNode:
             except Exception as e:
                 print(f"Error fetching common registry: {e}")
                 
-            # Access the routing table buckets directly
-            if hasattr(self.server, 'protocol') and hasattr(self.server.protocol, 'router'):
-                # Iterate through all buckets in the routing table
-                for bucket in self.server.protocol.router.buckets:
-                    for node in bucket.nodes:
-                        # Handle different node types safely
+            # Try to access the routing table buckets directly with version-agnostic code
+            try:
+                # Check if the router has buckets
+                if hasattr(self.server.protocol, 'router'):
+                    router = self.server.protocol.router
+                    
+                    # Try different router APIs
+                    router_nodes = []
+                    
+                    # Method 1: Direct getNodes/get_nodes method
+                    if hasattr(router, 'getNodes'):
                         try:
-                            # If node is already a node object with id attribute
+                            router_nodes = router.getNodes()
+                        except Exception as e:
+                            print(f"Error using getNodes(): {e}")
+                    elif hasattr(router, 'get_nodes'):
+                        try:
+                            router_nodes = router.get_nodes()
+                        except Exception as e:
+                            print(f"Error using get_nodes(): {e}")
+                    
+                    # Method 2: Access buckets directly
+                    if hasattr(router, 'buckets'):
+                        try:
+                            for bucket in router.buckets:
+                                if hasattr(bucket, 'nodes'):
+                                    for node in bucket.nodes:
+                                        router_nodes.append(node)
+                        except Exception as e:
+                            print(f"Error accessing buckets: {e}")
+                    
+                    # Process any found nodes
+                    for node in router_nodes:
+                        try:
+                            # Handle different node types safely
                             if hasattr(node, 'id'):
                                 if node.id:
                                     potential_node_ids.add(node.id.hex())
@@ -217,78 +265,85 @@ class KademliaNode:
                             elif isinstance(node, tuple) and len(node) > 0 and isinstance(node[0], bytes):
                                 potential_node_ids.add(node[0].hex())
                         except Exception as e:
-                            print(f"Error processing node in bucket: {e}, node type: {type(node)}")
-                            continue  # Skip this node and continue with others
+                            print(f"Error processing node: {e}, node type: {type(node)}")
+                            continue
+            except Exception as e:
+                print(f"Error accessing routing table: {e}")
                 
-                print(f"Found {len(potential_node_ids)} potential node IDs in routing table. Fetching details...")
+            print(f"Found {len(potential_node_ids)} potential node IDs. Fetching details...")
 
-                tasks = [self.server.get(node_id) for node_id in potential_node_ids]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Get info for all potential nodes
+            tasks = []
+            for node_id in potential_node_ids:
+                tasks.append(self.safe_get_node_data(node_id))
+                
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                current_time = asyncio.get_event_loop().time()
-                for i, result in enumerate(results):
-                    node_id = list(potential_node_ids)[i]
-                    if isinstance(result, Exception) or result is None:
-                        print(f"Could not retrieve data for node {node_id}: {result}")
-                        continue
-                    try:
-                        node_data = json.loads(result)
-                        print(f"Retrieved node data for {node_id}: {node_data}")
-                        
-                        # Check timestamp for freshness
-                        if current_time - node_data.get('timestamp', 0) < timeout_seconds:
-                            http_address = node_data.get('http_address')
-                            if http_address:
-                                if node_data.get('node_id') == self.node_id.hex():
-                                    print(f"Skipping self node {node_id}")
-                                    continue
-                                    
-                                # Special handling for Railway deployment with shared URL 
-                                # but different node prefixes
-                                if 'railway.app' in http_address:
-                                    # Add scheme if missing
-                                    if not http_address.startswith(('http://', 'https://')):
-                                        http_address = f"https://{http_address}"
-                                        print(f"Added https scheme to Railway URL: {http_address}")
-                                    
-                                    # Remove any semicolons that might be in the URL
-                                    http_address = http_address.replace(';', '')
-                                    
-                                    # If there's already a node prefix, use it
-                                    if '/node' in http_address and not http_address.endswith('/'):
-                                        print(f"Adding Railway peer with prefixed address: {http_address}")
-                                        peers.add(http_address)
-                                    else:
-                                        # Try to extract node ID from Kademlia data
-                                        if 'kad_port' in node_data:
-                                            # Calculate node number from port offset
-                                            base_port = 5678
-                                            port_offset = node_data['kad_port'] - base_port
-                                            if port_offset >= 0:
-                                                # Assuming node0 is on base port, node1 on base+1, etc.
-                                                node_url = f"{http_address}/node{port_offset}"
-                                                print(f"Adding derived Railway peer address: {node_url}")
-                                                peers.add(node_url)
-                                            else:
-                                                print(f"Adding standard peer: {http_address}")
-                                                peers.add(http_address)
+            current_time = asyncio.get_event_loop().time()
+            for i, result in enumerate(results):
+                node_id = list(potential_node_ids)[i]
+                if isinstance(result, Exception):
+                    print(f"Could not retrieve data for node {node_id}: {result}")
+                    continue
+                if result is None:
+                    continue
+                    
+                try:
+                    node_data = result
+                    print(f"Retrieved node data for {node_id}: {node_data}")
+                    
+                    # Check timestamp for freshness
+                    if current_time - node_data.get('timestamp', 0) < timeout_seconds:
+                        http_address = node_data.get('http_address')
+                        if http_address:
+                            if node_data.get('node_id') == self.node_id.hex():
+                                print(f"Skipping self node {node_id}")
+                                continue
+                                
+                            # Special handling for Railway deployment with shared URL 
+                            # but different node prefixes
+                            if 'railway.app' in http_address:
+                                # Add scheme if missing
+                                if not http_address.startswith(('http://', 'https://')):
+                                    http_address = f"https://{http_address}"
+                                    print(f"Added https scheme to Railway URL: {http_address}")
+                                
+                                # Remove any semicolons that might be in the URL
+                                http_address = http_address.replace(';', '')
+                                
+                                # If there's already a node prefix, use it
+                                if '/node' in http_address and not http_address.endswith('/'):
+                                    print(f"Adding Railway peer with prefixed address: {http_address}")
+                                    peers.add(http_address)
+                                else:
+                                    # Try to extract node ID from Kademlia data
+                                    if 'kad_port' in node_data:
+                                        # Calculate node number from port offset
+                                        base_port = 5678
+                                        port_offset = node_data['kad_port'] - base_port
+                                        if port_offset >= 0:
+                                            # Assuming node0 is on base port, node1 on base+1, etc.
+                                            node_url = f"{http_address}/node{port_offset}"
+                                            print(f"Adding derived Railway peer address: {node_url}")
+                                            peers.add(node_url)
                                         else:
                                             print(f"Adding standard peer: {http_address}")
                                             peers.add(http_address)
-                                else:
-                                    print(f"Adding peer with HTTP address: {http_address}")
-                                    peers.add(http_address)
+                                    else:
+                                        print(f"Adding standard peer: {http_address}")
+                                        peers.add(http_address)
                             else:
-                                print(f"Skipping node {node_id}: missing HTTP address")
+                                print(f"Adding peer with HTTP address: {http_address}")
+                                peers.add(http_address)
                         else:
-                            timestamp = node_data.get('timestamp', 0)
-                            age = current_time - timestamp
-                            print(f"Node {node_id} data is stale: age={age}s, timeout={timeout_seconds}s")
+                            print(f"Skipping node {node_id}: missing HTTP address")
+                    else:
+                        timestamp = node_data.get('timestamp', 0)
+                        age = current_time - timestamp
+                        print(f"Node {node_id} data is stale: age={age}s, timeout={timeout_seconds}s")
 
-                    except json.JSONDecodeError:
-                        print(f"Could not decode JSON for node {node_id}: {result}")
-                    except Exception as e:
-                        print(f"Error processing data for node {node_id}: {e}")
+                except Exception as e:
+                    print(f"Error processing data for node {node_id}: {e}")
 
             # For Railway deployment, try direct node-prefix approach
             if 'railway.app' in self.http_address:
@@ -329,37 +384,42 @@ class KademliaNode:
                     
                     # Try different ping approaches based on kademlia library version
                     try:
-                        # Most reliable: check if we can send a find_node query 
-                        # which works across more kademlia implementations
-                        find_id = digest(random.getrandbits(255).to_bytes(32, byteorder='big'))
-                        find_future = self.server.protocol.callFindNode(node, find_id)
-                        result = await asyncio.wait_for(find_future, timeout=2)
-                        if result and isinstance(result, list):
-                            print(f"Found active node at {ip}:{test_port} via find_node query")
-                            
-                            # Construct standard HTTP address format
-                            http_port = 8000 + port_offset  # Convention: HTTP port = 8000 + offset
-                            http_address = f"http://{ip}:{http_port}"
-                            if http_address != self.http_address:  # Don't add self
-                                print(f"Adding discovered peer via find_node: {http_address}")
-                                peers.add(http_address)
-                    except Exception as e:
-                        print(f"Find_node probe failed: {e}, trying simpler approach")
-                        # Try simplest approach possible
+                        # Use find_value instead of find_node to avoid rpc_callFindNode error
+                        random_key = digest(random.getrandbits(255).to_bytes(32, byteorder='big')).hex()
                         try:
-                            # Check if node exists in the routing table
-                            if self.server.protocol.router.isNewNode(node):
-                                print(f"Node {ip}:{test_port} is not in routing table")
-                            else:
-                                print(f"Found known node at {ip}:{test_port}")
+                            # Wrap in try-except to handle all potential errors
+                            find_future = await self.safe_find_value(node, random_key)
+                            if find_future:
+                                print(f"Found active node at {ip}:{test_port} via find_value query")
+                                
                                 # Construct standard HTTP address format
-                                http_port = 8000 + port_offset
+                                http_port = 8000 + port_offset  # Convention: HTTP port = 8000 + offset
                                 http_address = f"http://{ip}:{http_port}"
-                                if http_address != self.http_address:
-                                    print(f"Adding discovered peer via routing table: {http_address}")
+                                if http_address != self.http_address:  # Don't add self
+                                    print(f"Adding discovered peer via find_value: {http_address}")
                                     peers.add(http_address)
+                        except Exception as e:
+                            print(f"Find_value probe failed: {e}")
+                    except Exception as e:
+                        print(f"Probing approach failed: {e}, trying simpler approach")
+                        # Try simplest approach possible - check if we can read a known key
+                        try:
+                            common_key = "blockchain_nodes_registry"
+                            # Send the request directly to the suspected node
+                            try:
+                                value = await self.server.protocol.callReadValue(node, common_key.encode())
+                                if value:
+                                    print(f"Node at {ip}:{test_port} responded to read request")
+                                    # Construct standard HTTP address format
+                                    http_port = 8000 + port_offset
+                                    http_address = f"http://{ip}:{http_port}"
+                                    if http_address != self.http_address:
+                                        print(f"Adding discovered peer via direct read: {http_address}")
+                                        peers.add(http_address)
+                            except Exception as e:
+                                print(f"Direct read attempt failed: {e}")
                         except Exception as e2:
-                            print(f"Routing table check failed: {e2}")
+                            print(f"Fallback check failed: {e2}")
                             pass
                 except Exception as e:
                     # Expected to fail for nodes that don't exist, only print for unexpected errors
@@ -374,6 +434,39 @@ class KademliaNode:
 
         print(f"Discovered active blockchain peers via Kademlia: {list(peers)}")
         return list(peers)
+    
+    async def safe_get_node_data(self, node_id):
+        """Safely get node data with error handling"""
+        try:
+            result = await self.server.get(node_id)
+            if result is None:
+                return None
+            
+            try:
+                return json.loads(result)
+            except json.JSONDecodeError:
+                print(f"Could not decode JSON for node {node_id}: {result}")
+                return None
+        except Exception as e:
+            print(f"Error getting data for node {node_id}: {e}")
+            return None
+            
+    async def safe_find_value(self, node, key):
+        """Safer find_value implementation that works with different Kademlia versions"""
+        try:
+            # Try the direct protocol call which is less likely to have version issues
+            if hasattr(self.server.protocol, 'callFindValue'):
+                result = await self.server.protocol.callFindValue(node, key.encode())
+                return result
+            # Fall back to the higher-level API
+            elif hasattr(self.server, 'get'):
+                # This doesn't contact the specific node but tries the network
+                result = await self.server.get(key)
+                return result is not None  # Return whether we found anything
+            return False
+        except Exception as e:
+            print(f"Safe find_value failed: {e}")
+            return False
     
     def get_ip(self):
         """Get the local IP address usable within the Docker network."""
