@@ -23,6 +23,13 @@ class KademliaNode:
         self.port = port
         self.bootstrap_nodes = bootstrap_nodes or []
         self.server = Server()
+        
+        # Increase RPC timeout to reduce timeout errors
+        if hasattr(self.server, 'protocol') and hasattr(self.server.protocol, 'timeout'):
+            # Default is 5 seconds, increase to 10
+            self.server.protocol.timeout = 10
+            print(f"Increased RPC timeout to {self.server.protocol.timeout} seconds")
+        
         # Use a stable node_id if possible, maybe derived from http_address or persisted
         # For simplicity, keeping random for now, but consider persistence
         self.node_id = digest(random.getrandbits(255).to_bytes(32, byteorder='big'))
@@ -49,35 +56,34 @@ class KademliaNode:
             # Add rpc_callFindValue method if it doesn't exist
             if not hasattr(self.server.protocol, 'rpc_callFindValue'):
                 async def rpc_callFindValue(sender, key):
-                    source = (sender[0], sender[1])
-                    if hasattr(self.server.protocol, 'router'):
-                        # Handle different versions of the API (with or without underscores)
+                    try:
+                        # Handle different router API versions
+                        if not hasattr(self.server.protocol, 'router'):
+                            return {'nodes': []}
+                            
                         router = self.server.protocol.router
                         
-                        # Convert key to Node object if it's not already one
+                        # Convert the key to a proper Node object using our helper
                         try:
-                            if isinstance(key, bytes):
-                                # Ensure key is proper length for Node initialization
-                                if len(key) != 20:  # Standard Kademlia ID length
-                                    # Hash it to get consistent length
-                                    key = digest(key)
-                                key_node = Node(key)
-                            else:
-                                # If it's not bytes, try to encode it first
-                                if isinstance(key, str):
-                                    key_bytes = key.encode('utf-8')
-                                    if len(key_bytes) != 20:
-                                        key_bytes = digest(key_bytes)
-                                    key_node = Node(key_bytes)
-                                else:
-                                    key_node = key
-                                
+                            key_node = self._convert_to_node(key)
                             print(f"Created Node object for key: {type(key_node)}")
                             
+                            # Different router versions handle exclusion differently
                             if hasattr(router, 'find_neighbors'):
-                                neighbors = router.find_neighbors(key_node, exclude=source)
+                                # Modern API expects a Node object or ID for exclusion
+                                try:
+                                    # Try without exclusion if there are issues
+                                    neighbors = router.find_neighbors(key_node)
+                                except Exception as e:
+                                    print(f"Basic find_neighbors failed, trying alternate approach: {e}")
+                                    neighbors = []
                             elif hasattr(router, 'findNeighbors'):  # older version
-                                neighbors = router.findNeighbors(key_node, exclude=source)
+                                try:
+                                    # Try without exclusion if there are issues
+                                    neighbors = router.findNeighbors(key_node)
+                                except Exception as e:
+                                    print(f"Basic findNeighbors failed, trying alternate approach: {e}")
+                                    neighbors = []
                             else:
                                 print("Warning: Router has neither find_neighbors nor findNeighbors method")
                                 neighbors = []
@@ -86,42 +92,44 @@ class KademliaNode:
                             neighbors = []
                             
                         return {'nodes': neighbors}
-                    return {'nodes': []}
+                    except Exception as e:
+                        print(f"Error in rpc_callFindValue: {e}")
+                        return {'nodes': []}
+                        
                 setattr(self.server.protocol, 'rpc_callFindValue', rpc_callFindValue)
                 print("Added rpc_callFindValue method to protocol")
                 
             # Add rpc_find_value method if it doesn't exist
             if not hasattr(self.server.protocol, 'rpc_find_value'):
                 async def rpc_find_value(sender, key):
-                    source = (sender[0], sender[1])
-                    if hasattr(self.server.protocol, 'router'):
-                        # Handle different versions of the API (with or without underscores)
+                    try:
+                        # Handle different router API versions
+                        if not hasattr(self.server.protocol, 'router'):
+                            return {'nodes': []}
+                            
                         router = self.server.protocol.router
                         
-                        # Convert key to Node object if it's not already one
+                        # Convert the key to a proper Node object using our helper
                         try:
-                            if isinstance(key, bytes):
-                                # Ensure key is proper length for Node initialization
-                                if len(key) != 20:  # Standard Kademlia ID length
-                                    # Hash it to get consistent length
-                                    key = digest(key)
-                                key_node = Node(key)
-                            else:
-                                # If it's not bytes, try to encode it first
-                                if isinstance(key, str):
-                                    key_bytes = key.encode('utf-8')
-                                    if len(key_bytes) != 20:
-                                        key_bytes = digest(key_bytes)
-                                    key_node = Node(key_bytes)
-                                else:
-                                    key_node = key
-                                
+                            key_node = self._convert_to_node(key)
                             print(f"Created Node object for key: {type(key_node)}")
                             
+                            # Different router versions handle exclusion differently
                             if hasattr(router, 'find_neighbors'):
-                                neighbors = router.find_neighbors(key_node, exclude=source)
+                                # Modern API expects a Node object or ID for exclusion
+                                try:
+                                    # Try without exclusion if there are issues
+                                    neighbors = router.find_neighbors(key_node)
+                                except Exception as e:
+                                    print(f"Basic find_neighbors failed, trying alternate approach: {e}")
+                                    neighbors = []
                             elif hasattr(router, 'findNeighbors'):  # older version
-                                neighbors = router.findNeighbors(key_node, exclude=source)
+                                try:
+                                    # Try without exclusion if there are issues
+                                    neighbors = router.findNeighbors(key_node)
+                                except Exception as e:
+                                    print(f"Basic findNeighbors failed, trying alternate approach: {e}")
+                                    neighbors = []
                             else:
                                 print("Warning: Router has neither find_neighbors nor findNeighbors method")
                                 neighbors = []
@@ -130,7 +138,10 @@ class KademliaNode:
                             neighbors = []
                             
                         return {'nodes': neighbors}
-                    return {'nodes': []}
+                    except Exception as e:
+                        print(f"Error in rpc_find_value: {e}")
+                        return {'nodes': []}
+                        
                 setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
                 print("Added rpc_find_value method to protocol")
                 
@@ -178,11 +189,41 @@ class KademliaNode:
         
         # Check Node class requirements
         try:
-            dummy_id = b'0' * 20  # Create a dummy ID to instantiate a Node
-            dummy_node = Node(dummy_id)
-            print(f"Node class has attributes: {dir(dummy_node)}")
-            if hasattr(dummy_node, 'long_id'):
-                print("Node class has 'long_id' attribute required by modern Kademlia")
+            print("Testing Node class initialization...")
+            # Test different formats for initialization
+            formats = []
+            
+            # Test 1: Basic byte ID
+            try:
+                dummy_id = b'0' * 20  # Create a dummy ID to instantiate a Node
+                dummy_node = Node(dummy_id)
+                formats.append("Bytes(20)")
+            except Exception as e:
+                print(f"Cannot create Node with 20-byte ID: {e}")
+                
+            # Test 2: String ID
+            try:
+                dummy_id = "0" * 40  # hex string
+                dummy_node = Node(bytes.fromhex(dummy_id))
+                formats.append("HexString->Bytes")
+            except Exception as e:
+                print(f"Cannot create Node with hex string ID: {e}")
+            
+            # Print successful formats
+            print(f"Node class initialization supports formats: {formats}")
+                
+            # Check for required attributes
+            if len(formats) > 0:
+                dummy_id = b'0' * 20
+                dummy_node = Node(dummy_id)
+                attrs = [attr for attr in dir(dummy_node) if not attr.startswith('_')]
+                print(f"Node instance has attributes: {attrs}")
+                
+                if hasattr(dummy_node, 'long_id'):
+                    print(f"Node has 'long_id' attribute of type: {type(dummy_node.long_id)}")
+                if hasattr(dummy_node, 'id'):
+                    print(f"Node has 'id' attribute of type: {type(dummy_node.id)}")
+                    
         except Exception as e:
             print(f"Error checking Node class attributes: {e}")
             
@@ -216,8 +257,14 @@ class KademliaNode:
             self.running = True
             print(f"Kademlia DHT node listening on port {self.port}")
             
-            # Now that the server has started and protocol is initialized, patch RPC methods
+            # Now that the server has started and protocol is initialized, set timeout and patch RPC methods
             if hasattr(self.server, 'protocol') and self.server.protocol is not None:
+                # Increase RPC timeout to reduce timeout errors
+                if hasattr(self.server.protocol, 'timeout'):
+                    # Default is 5 seconds, increase to 15
+                    self.server.protocol.timeout = 15
+                    print(f"Increased RPC timeout to {self.server.protocol.timeout} seconds")
+                
                 # Detect which API version we're using
                 self._detect_router_api_version()
                 # Patch RPC methods
@@ -525,6 +572,8 @@ class KademliaNode:
                                         print(f"Adding standard peer: {http_address}")
                                         peers.add(http_address)
                             else:
+                                # Remove any semicolons and clean up the URL
+                                http_address = http_address.replace(';', '')
                                 print(f"Adding peer with HTTP address: {http_address}")
                                 peers.add(http_address)
                         else:
@@ -587,6 +636,8 @@ class KademliaNode:
                                 # Construct standard HTTP address format
                                 http_port = 8000 + port_offset  # Convention: HTTP port = 8000 + offset
                                 http_address = f"http://{ip}:{http_port}"
+                                # Remove any semicolons
+                                http_address = http_address.replace(';', '')
                                 if http_address != self.http_address:  # Don't add self
                                     print(f"Adding discovered peer via find_value: {http_address}")
                                     peers.add(http_address)
@@ -605,6 +656,8 @@ class KademliaNode:
                                     # Construct standard HTTP address format
                                     http_port = 8000 + port_offset
                                     http_address = f"http://{ip}:{http_port}"
+                                    # Remove any semicolons
+                                    http_address = http_address.replace(';', '')
                                     if http_address != self.http_address:
                                         print(f"Adding discovered peer via direct read: {http_address}")
                                         peers.add(http_address)
@@ -624,8 +677,14 @@ class KademliaNode:
             import traceback
             traceback.print_exc()
 
-        print(f"Discovered active blockchain peers via Kademlia: {list(peers)}")
-        return list(peers)
+        # Final sanity check to ensure no URLs have semicolons
+        clean_peers = set()
+        for peer in peers:
+            clean_peer = peer.replace(';', '')
+            clean_peers.add(clean_peer)
+            
+        print(f"Discovered active blockchain peers via Kademlia: {list(clean_peers)}")
+        return list(clean_peers)
     
     async def safe_get_node_data(self, node_id):
         """Safely get node data with error handling"""
@@ -643,38 +702,38 @@ class KademliaNode:
             print(f"Error getting data for node {node_id}: {e}")
             return None
             
-    async def safe_find_value(self, node, key):
+    async def safe_find_value(self, node, key, max_retries=3):
         """Safer find_value implementation that works with different Kademlia versions"""
         try:
             # First, try to patch the protocol if needed to support callFindValue
             if hasattr(self.server, 'protocol') and not hasattr(self.server.protocol, 'callFindValue'):
                 # Add support for callFindValue if it doesn't exist
                 async def rpc_find_value(sender, key):
-                    source = (sender[0], sender[1])
-                    if hasattr(self.server.protocol, 'router'):
-                        router = self.server.protocol.router
-                        # Handle different versions of the API
-                        try:
-                            if isinstance(key, bytes):
-                                # Ensure key is proper length for Node initialization
-                                if len(key) != 20:  # Standard Kademlia ID length
-                                    # Hash it to get consistent length
-                                    key = digest(key)
-                                key_node = Node(key)
-                            else:
-                                # If it's not bytes, try to encode it first
-                                if isinstance(key, str):
-                                    key_bytes = key.encode('utf-8')
-                                    if len(key_bytes) != 20:
-                                        key_bytes = digest(key_bytes)
-                                    key_node = Node(key_bytes)
-                                else:
-                                    key_node = key
+                    try:
+                        # Handle different router API versions
+                        if not hasattr(self.server.protocol, 'router'):
+                            return {'nodes': []}
                             
+                        router = self.server.protocol.router
+                        
+                        # Convert the key to a proper Node object using our helper
+                        try:
+                            key_node = self._convert_to_node(key)
+                            
+                            # Different router versions handle exclusion differently
                             if hasattr(router, 'find_neighbors'):
-                                neighbors = router.find_neighbors(key_node, exclude=source)
+                                # Modern API expects a Node object or ID for exclusion
+                                try:
+                                    neighbors = router.find_neighbors(key_node)
+                                except Exception as e:
+                                    print(f"Basic find_neighbors failed, trying alternate approach: {e}")
+                                    neighbors = []
                             elif hasattr(router, 'findNeighbors'):
-                                neighbors = router.findNeighbors(key_node, exclude=source)
+                                try:
+                                    neighbors = router.findNeighbors(key_node)
+                                except Exception as e:
+                                    print(f"Basic findNeighbors failed, trying alternate approach: {e}")
+                                    neighbors = []
                             else:
                                 print("Warning: Router has neither find_neighbors nor findNeighbors method")
                                 neighbors = []
@@ -682,7 +741,9 @@ class KademliaNode:
                             print(f"Error in rpc_find_value: {e}")
                             neighbors = []
                         return {'nodes': neighbors}
-                    return {'nodes': []}
+                    except Exception as e:
+                        print(f"Error in rpc_find_value: {e}")
+                        return {'nodes': []}
                     
                 # Add the missing method to handle RPC calls
                 setattr(self.server.protocol, 'rpc_find_value', rpc_find_value)
@@ -691,18 +752,33 @@ class KademliaNode:
                 if not hasattr(self.server.protocol, 'rpc_callFindValue'):
                     setattr(self.server.protocol, 'rpc_callFindValue', rpc_find_value)
                 
-                # Add support for making calls
-                async def call_find_value(node_tuple, key_bytes):
-                    address = (node_tuple[0], node_tuple[1])
-                    # Ensure key_bytes is properly encoded
-                    if isinstance(key_bytes, str):
-                        key_bytes = key_bytes.encode('utf-8')
-                    message = {'y': 'q', 'u': 'find_value', 'a': {'id': self.node_id, 'key': key_bytes}}
+                # Add support for making calls with retry
+                async def call_find_value(node_tuple, key_bytes, retries=max_retries):
                     try:
-                        response = await self.server.protocol.sendRPC(address, message)
-                        return response.get('nodes', [])
+                        address = (node_tuple[0], node_tuple[1])
+                        # Ensure key_bytes is properly encoded
+                        if isinstance(key_bytes, str):
+                            key_bytes = key_bytes.encode('utf-8')
+                        message = {'y': 'q', 'u': 'find_value', 'a': {'id': self.node_id, 'key': key_bytes}}
+                        
+                        # Try with retries
+                        for attempt in range(retries + 1):
+                            try:
+                                if attempt > 0:
+                                    print(f"Retry {attempt}/{retries} for call_find_value to {address}")
+                                response = await self.server.protocol.sendRPC(address, message)
+                                return response.get('nodes', [])
+                            except Exception as e:
+                                if attempt < retries:
+                                    # Wait a bit before retrying (exponential backoff)
+                                    wait_time = 0.5 * (2 ** attempt)  # 0.5s, 1s, 2s, ...
+                                    print(f"RPC failed: {e}, retrying in {wait_time}s...")
+                                    await asyncio.sleep(wait_time)
+                                else:
+                                    print(f"Error in call_find_value after {retries} retries: {e}")
+                                    return []
                     except Exception as e:
-                        print(f"Error in call_find_value: {e}")
+                        print(f"Error preparing call_find_value: {e}")
                         return []
                         
                 # Add the missing method to make calls
@@ -710,25 +786,57 @@ class KademliaNode:
                 
             # Try the direct protocol call which is less likely to have version issues
             if hasattr(self.server.protocol, 'callFindValue'):
-                # Ensure key is properly encoded
+                # Ensure key is properly encoded for RPC
                 if isinstance(key, str):
                     key_encoded = key.encode('utf-8')
                 else:
                     key_encoded = key
-                result = await self.server.protocol.callFindValue(node, key_encoded)
-                return result is not None and len(result) > 0
+                
+                # Call with retries
+                for attempt in range(max_retries + 1):
+                    try:
+                        if attempt > 0:
+                            print(f"Retry {attempt}/{max_retries} for callFindValue to {node}")
+                        result = await self.server.protocol.callFindValue(node, key_encoded)
+                        return result is not None and len(result) > 0
+                    except Exception as e:
+                        if attempt < max_retries:
+                            # Wait a bit before retrying (exponential backoff)
+                            wait_time = 0.5 * (2 ** attempt)  # 0.5s, 1s, 2s, ...
+                            print(f"RPC failed: {e}, retrying in {wait_time}s...")
+                            await asyncio.sleep(wait_time)
+                        else:
+                            print(f"Find value failed after {max_retries} retries: {e}")
+                            
             # Fall back to the higher-level API
             elif hasattr(self.server, 'get'):
                 # This doesn't contact the specific node but tries the network
-                result = await self.server.get(key)
-                return result is not None  # Return whether we found anything
+                try:
+                    result = await self.server.get(key)
+                    return result is not None  # Return whether we found anything
+                except Exception as e:
+                    print(f"Error using server.get for key {key}: {e}")
+                    
             # Last resort: try a direct ping
             elif hasattr(self.server.protocol, 'ping'):
                 try:
-                    ping_result = await self.server.protocol.ping(node)
-                    return ping_result
-                except Exception:
-                    pass
+                    for attempt in range(max_retries + 1):
+                        try:
+                            if attempt > 0:
+                                print(f"Retry {attempt}/{max_retries} for ping to {node}")
+                            ping_result = await self.server.protocol.ping(node)
+                            return ping_result
+                        except Exception as e:
+                            if attempt < max_retries:
+                                # Wait a bit before retrying
+                                wait_time = 0.5 * (2 ** attempt)
+                                print(f"Ping failed: {e}, retrying in {wait_time}s...")
+                                await asyncio.sleep(wait_time)
+                            else:
+                                print(f"Ping failed after {max_retries} retries")
+                except Exception as e:
+                    print(f"Error during ping: {e}")
+                    
             return False
         except Exception as e:
             print(f"Safe find_value failed: {e}")
@@ -810,6 +918,58 @@ class KademliaNode:
             print("Kademlia DHT stop requested.")
         else:
              print("Kademlia node stop called, but not running.")
+
+    def _convert_to_node(self, key):
+        """Convert a key to a Node object safely, handling various input formats"""
+        try:
+            # If it's already a Node object, no conversion needed
+            if hasattr(key, 'id') and hasattr(key, 'long_id'):
+                return key
+                
+            # If it's bytes, create a Node directly
+            if isinstance(key, bytes):
+                # Ensure correct length (20 bytes)
+                if len(key) != 20:
+                    key = digest(key)
+                return Node(key)
+                
+            # If it's a string, convert to bytes then to Node
+            if isinstance(key, str):
+                # If it looks like a hex string, convert it
+                if all(c in '0123456789abcdefABCDEF' for c in key):
+                    # Make sure it's the right length
+                    if len(key) != 40:  # 20 bytes = 40 hex chars
+                        # Hash it instead
+                        key_bytes = digest(key.encode('utf-8'))
+                    else:
+                        try:
+                            key_bytes = bytes.fromhex(key)
+                        except ValueError:
+                            # If we can't convert from hex, hash it
+                            key_bytes = digest(key.encode('utf-8'))
+                else:
+                    # If it's not a hex string, hash it
+                    key_bytes = digest(key.encode('utf-8'))
+                    
+                return Node(key_bytes)
+                
+            # If it's a tuple, try to extract the ID (often tuples have ID as first element)
+            if isinstance(key, tuple) and len(key) > 0:
+                # If first element is bytes, use that as ID
+                if isinstance(key[0], bytes):
+                    return self._convert_to_node(key[0])
+                # If first element is a string, convert that
+                elif isinstance(key[0], str):
+                    return self._convert_to_node(key[0])
+                    
+            # If it's something else entirely, hash it as a string representation
+            return Node(digest(str(key).encode('utf-8')))
+            
+        except Exception as e:
+            print(f"Error creating Node object: {e}")
+            # Last resort - create a random node
+            random_id = digest(random.getrandbits(255).to_bytes(32, byteorder='big'))
+            return Node(random_id)
 
 # Command line interface to run a standalone Kademlia node
 if __name__ == "__main__":
