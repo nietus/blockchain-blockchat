@@ -49,23 +49,23 @@ docker-compose down -v
 
 This setup runs multiple blockchain nodes within a single Railway deployment. Each node is accessible via a different URL path:
 
-- Node 0 (Bootstrap node): https://your-app-name.up.railway.app/node0
+- Node 0 (Bootstrap node): https://blockchain-bc-production.up.railway.app/node0
 
-  - View blockchain: https://your-app-name.up.railway.app/node0/chain
-  - Mine blocks: https://your-app-name.up.railway.app/node0/mine
-  - View pending transactions: https://your-app-name.up.railway.app/node0/pending_tx
+  - View blockchain: https://blockchain-bc-production.up.railway.app/node0/chain
+  - Mine blocks: https://blockchain-bc-production.up.railway.app/node0/mine
+  - View pending transactions: https://blockchain-bc-production.up.railway.app/node0/pending_tx
 
-- Node 1: https://your-app-name.up.railway.app/node1
+- Node 1: https://blockchain-bc-production.up.railway.app/node1
 
-  - View blockchain: https://your-app-name.up.railway.app/node1/chain
-  - Mine blocks: https://your-app-name.up.railway.app/node1/mine
-  - View pending transactions: https://your-app-name.up.railway.app/node1/pending_tx
+  - View blockchain: https://blockchain-bc-production.up.railway.app/node1/chain
+  - Mine blocks: https://blockchain-bc-production.up.railway.app/node1/mine
+  - View pending transactions: https://blockchain-bc-production.up.railway.app/node1/pending_tx
 
-- Node 2: https://your-app-name.up.railway.app/node2
-  - View blockchain: https://your-app-name.up.railway.app/node2/chain
-  - Mine blocks: https://your-app-name.up.railway.app/node2/mine
-  - View pending transactions: https://your-app-name.up.railway.app/node2/pending_tx
+- Node 2: https://blockchain-bc-production.up.railway.app/node2
+  - View blockchain: https://blockchain-bc-production.up.railway.app/node2/chain
+  - Mine blocks: https://blockchain-bc-production.up.railway.app/node2/mine
+  - View pending transactions: https://blockchain-bc-production.up.railway.app/node2/pending_tx
 
-The home page at https://your-app-name.up.railway.app/ shows a list of all available nodes.
+The home page at https://blockchain-bc-production.up.railway.app/ shows a list of all available nodes.
 
 Note: Railway uses the PORT environment variable internally, which will override your FLASK_RUN_PORT setting.
