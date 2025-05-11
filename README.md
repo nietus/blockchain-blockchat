@@ -67,5 +67,3 @@ This setup runs multiple blockchain nodes within a single Railway deployment. Ea
   - View pending transactions: https://blockchain-bc-production.up.railway.app/node2/pending_tx
 
 The home page at https://blockchain-bc-production.up.railway.app/ shows a list of all available nodes.
-
-Note: Railway uses the PORT environment variable internally, which will override your FLASK_RUN_PORT setting.
